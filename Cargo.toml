@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+libseccomp-sys = "0.3"
 
 [[bin]]
 name = "playpen"
