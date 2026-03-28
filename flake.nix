@@ -25,6 +25,14 @@
 
     packages.x86_64-linux.default = selfpkgs.hello;
 
+    packages.x86_64-linux.playpen = pkgs.rustPlatform.buildRustPackage {
+      name = "playpen";
+      src = ./.;
+      cargoLock = {
+        lockFile = ./Cargo.lock;
+      };
+    };
+
     devShells.x86_64-linux.default = pkgs.mkShell {
       RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
       buildInputs = [
