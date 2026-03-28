@@ -1,3 +1,5 @@
+mod fd_portal;
+
 use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
