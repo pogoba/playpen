@@ -1,3 +1,10 @@
+# 🤹 Playpen
+
+Your LLM 👶 behaves like a clown 🤡 and eats every bait 🎣 it can find?
+Put your agent in a playpen and hope that it won't escape 🎰
+
+## Notes
+
 https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html
 https://www.man7.org/linux/man-pages/man2/seccomp.2.html
 https://www.man7.org/linux/man-pages/man2/PR_SET_SECCOMP.2const.html
