@@ -208,7 +208,61 @@ fn read_cstring_from_pid(pid: libc::pid_t, addr: u64) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&buf).to_string())
 }
 
+fn is_immutable(flags: u64) -> bool {
+    // catch unspecified cases
+    if (flags as libc::c_int & (libc::O_APPEND | libc::O_CREAT | libc::O_TRUNC)) != 0 {
+        return false;
+    }
+    // whitelist
+    match flags as libc::c_int & libc::O_ACCMODE {
+        libc::O_RDONLY => return true,
+        _ => {},
+    };
+    // deny by default
+    return false;
+}
+
+fn format_open_flags(flags: u64) -> String {
+    let mut parts: Vec<&'static str> = Vec::new();
+    let accmode = flags as libc::c_int & libc::O_ACCMODE;
+    match accmode {
+        libc::O_RDONLY => parts.push("O_RDONLY"),
+        libc::O_WRONLY => parts.push("O_WRONLY"),
+        libc::O_RDWR => parts.push("O_RDWR"),
+        _ => parts.push("O_ACCMODE?"),
+    }
+
+    let flag_map: &[(libc::c_int, &str)] = &[
+        (libc::O_APPEND, "O_APPEND"),
+        (libc::O_CLOEXEC, "O_CLOEXEC"),
+        (libc::O_CREAT, "O_CREAT"),
+        (libc::O_DIRECTORY, "O_DIRECTORY"),
+        (libc::O_EXCL, "O_EXCL"),
+        (libc::O_NOFOLLOW, "O_NOFOLLOW"),
+        (libc::O_TRUNC, "O_TRUNC"),
+    ];
+
+    for (flag, name) in flag_map {
+        if (flags as libc::c_int & *flag) != 0 {
+            parts.push(*name);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if (flags as libc::c_int & libc::O_TMPFILE) != 0 {
+            parts.push("O_TMPFILE");
+        }
+    }
+
+    parts.join("|")
+}
+
 fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, prompt: bool) -> bool {
+    if syscall == libc::SYS_openat as i64 && is_immutable(args[2]) {
+        return true;
+    }
+
     if !std::io::stdout().is_terminal() {
         eprintln!(
             "Intercepted syscall {}, allowing by default because terminal is not available.",
@@ -251,12 +305,18 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, pr
         None
     };
 
+    let openat_flags = if syscall == libc::SYS_openat as i64 {
+        Some(format_open_flags(args[2]))
+    } else {
+        None
+    };
+
     let mut selected = 0;
     let state = loop {
         terminal
             .draw(|f| {
                 let size = f.area();
-                let detail_lines_len = if openat_path.is_some() { 3 } else { 2 };
+                let detail_lines_len = if openat_path.is_some() { 4 } else { 2 };
                 let selector_height = detail_lines_len + 3;
                 let selector_area = ratatui::layout::Rect::new(
                     0,
@@ -289,6 +349,16 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, pr
                         Span::styled(
                             path.clone(),
                             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
+
+                if let Some(flags) = &openat_flags {
+                    detail_lines.push(Line::from(vec![
+                        Span::raw("flags: "),
+                        Span::styled(
+                            flags.clone(),
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
                         ),
                     ]));
                 }
