@@ -156,9 +156,6 @@ fn show_confirmation_prompt() -> ConfirmationState {
         .expect("Failed to disable mouse capture");
     terminal.show_cursor().expect("Failed to show cursor");
 
-    println!();
-    println!();
-    std::io::stdout().flush().ok();
     state
 }
 
@@ -373,6 +370,8 @@ fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
             (*resp).error = 0;
             (*resp).flags = libseccomp_sys::SECCOMP_USER_NOTIF_FLAG_CONTINUE;
 
+            println!();
+            std::io::stdout().flush().ok();
 
             if libseccomp_sys::seccomp_notify_respond(fd, resp) < 0 {
                 let err = io::Error::last_os_error();
