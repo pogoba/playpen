@@ -368,67 +368,16 @@ fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
                 continue;
             }
 
-            let count = (*req).data.args[2] as usize;
-            let mut resp_val: i64 = 0;
-            let mut resp_err: i32 = 0;
-
-            if count > 0 {
-                let mut buffer = vec![0u8; count];
-                let local_iov = libc::iovec {
-                    iov_base: buffer.as_mut_ptr() as *mut _,
-                    iov_len: buffer.len(),
-                };
-                let remote_iov = libc::iovec {
-                    iov_base: (*req).data.args[1] as *mut _,
-                    iov_len: buffer.len(),
-                };
-
-                let read_bytes = libc::process_vm_readv(
-                    (*req).pid as libc::pid_t,
-                    &local_iov,
-                    1,
-                    &remote_iov,
-                    1,
-                    0,
-                );
-
-                if read_bytes < 0 {
-                    resp_err = -io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(libc::EFAULT);
-                } else {
-                    let to_write = read_bytes as usize;
-                    let write_res = libc::write(
-                        (*req).data.args[0] as libc::c_int,
-                        buffer.as_ptr() as *const _,
-                        to_write,
-                    );
-
-                    if write_res < 0 {
-                        resp_err = -io::Error::last_os_error()
-                            .raw_os_error()
-                            .unwrap_or(libc::EIO);
-                    } else {
-                        resp_val = write_res as i64;
-                    }
-                }
-            }
-
             (*resp).id = (*req).id;
-            (*resp).val = resp_val;
-            (*resp).error = resp_err;
-            (*resp).flags = 0;
+            (*resp).val = 0;
+            (*resp).error = 0;
+            (*resp).flags = libseccomp_sys::SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+
 
             if libseccomp_sys::seccomp_notify_respond(fd, resp) < 0 {
                 let err = io::Error::last_os_error();
                 break Err(err);
             }
-
-            println!(
-                "[playpen] emulated write of {} bytes for pid {}",
-                resp_val,
-                (*req).pid
-            );
         };
 
         libseccomp_sys::seccomp_notify_free(req, resp);
