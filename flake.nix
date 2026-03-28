@@ -21,6 +21,7 @@
     ];
     playpenDeps = [
       pkgs.libseccomp
+      pkgs.libseccomp.lib
     ];
   in {
 
@@ -42,6 +43,9 @@
       buildInputs = [
         rustToolchain
       ] ++ playpenDeps;
+      shellHook = ''
+        export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.libseccomp.lib}/lib"
+      '';
     };
 
   };
