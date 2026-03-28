@@ -13,7 +13,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::ffi::CString;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 
 #[derive(Parser)]
 #[command(name = "playpen")]
@@ -171,10 +171,18 @@ fn show_confirmation_prompt() -> ConfirmationState {
 }
 
 fn apply_seccomp_filter() -> Result<(), String> {
-    // Initialize seccomp filter with SCMP_ACT_ALLOW
+    // Initialize seccomp filter with SCMP_ACT_ALLOW as default action
+    // This allows all syscalls by default, then we blacklist specific ones
     let filter = unsafe { libseccomp_sys::seccomp_init(libseccomp_sys::SCMP_ACT_ALLOW) };
     if filter.is_null() {
         return Err("Failed to initialize seccomp filter".to_string());
+    }
+
+    // Blacklist write syscall - syscall number 1 on x86_64
+    // This will kill the process if write is called
+    let ret = unsafe { libseccomp_sys::seccomp_rule_add(filter, libseccomp_sys::SCMP_ACT_KILL, 1, 0) };
+    if ret != 0 {
+        return Err(format!("Failed to add write blacklist rule: {}", ret));
     }
 
     // Apply the filter to the current process
