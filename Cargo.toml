@@ -9,6 +9,7 @@ libc = "0.2"
 libseccomp-sys = "0.3"
 ratatui = "0.29"
 crossterm = "0.28"
+nix = { version = "0.31", features = ["socket", "uio"] }
 
 [[bin]]
 name = "playpen"
