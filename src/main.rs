@@ -4,15 +4,15 @@ use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame, Terminal,
 };
 use std::ffi::CString;
 use std::io::IsTerminal;
@@ -54,81 +54,83 @@ fn show_confirmation_prompt() -> ConfirmationState {
     let mut terminal = Terminal::new(backend).expect("Failed to create terminal");
 
     // Scroll terminal up by 3 lines to make room for selector at bottom
-    execute!(
-        std::io::stdout(),
-        crossterm::terminal::ScrollUp(3)
-    ).expect("Failed to scroll terminal");
+    execute!(std::io::stdout(), crossterm::terminal::ScrollUp(3))
+        .expect("Failed to scroll terminal");
 
     let mut state = ConfirmationState::Pending;
     let mut selected = 0; // 0 = start, 1 = abort
 
     loop {
-        terminal.draw(|f| {
-            let size = f.area();
+        terminal
+            .draw(|f| {
+                let size = f.area();
 
-            // Draw minimal selector at the bottom
-            let selector_height = 3;
-            let selector_area = ratatui::layout::Rect::new(
-                0,
-                size.height.saturating_sub(selector_height as u16),
-                size.width,
-                selector_height,
-            );
+                // Draw minimal selector at the bottom
+                let selector_height = 3;
+                let selector_area = ratatui::layout::Rect::new(
+                    0,
+                    size.height.saturating_sub(selector_height as u16),
+                    size.width,
+                    selector_height,
+                );
 
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1), // Status line
-                    Constraint::Min(0),
-                ])
-                .split(selector_area);
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1), // Status line
+                        Constraint::Min(0),
+                    ])
+                    .split(selector_area);
 
-            // Status line
-            let status = Paragraph::new(Line::from(vec![
-                Span::raw("Playpen: "),
-                Span::styled(
-                    if selected == 0 { "Start" } else { "Abort" },
-                    if selected == 0 {
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                    },
-                ),
-                Span::raw(" (↑/↓ to select, Enter to confirm, Esc to abort)"),
-            ]))
-            .style(Style::default());
-            f.render_widget(status, chunks[0]);
-
-            // Options
-            let options = vec![
-                Line::from(vec![
-                    Span::raw("  "),
+                // Status line
+                let status = Paragraph::new(Line::from(vec![
+                    Span::raw("Playpen: "),
                     Span::styled(
-                        "► Start command",
+                        if selected == 0 { "Start" } else { "Abort" },
                         if selected == 0 {
-                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-                        } else {
                             Style::default()
-                        },
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        "  Abort",
-                        if selected == 1 {
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
                             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default()
                         },
                     ),
-                ]),
-            ];
-            let options_widget = Paragraph::new(options)
+                    Span::raw(" (↑/↓ to select, Enter to confirm, Esc to abort)"),
+                ]))
                 .style(Style::default());
-            f.render_widget(options_widget, chunks[1]);
-        })
-        .expect("Failed to draw terminal");
+                f.render_widget(status, chunks[0]);
+
+                // Options
+                let options = vec![
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            "► Start command",
+                            if selected == 0 {
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            "  Abort",
+                            if selected == 1 {
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ]),
+                ];
+                let options_widget = Paragraph::new(options).style(Style::default());
+                f.render_widget(options_widget, chunks[1]);
+            })
+            .expect("Failed to draw terminal");
 
         if let Event::Key(key) = event::read().expect("Failed to read event") {
             if key.kind == KeyEventKind::Press {
@@ -162,11 +164,8 @@ fn show_confirmation_prompt() -> ConfirmationState {
     }
 
     disable_raw_mode().expect("Failed to disable raw mode");
-    execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-    )
-    .expect("Failed to disable mouse capture");
+    execute!(terminal.backend_mut(), DisableMouseCapture,)
+        .expect("Failed to disable mouse capture");
     terminal.show_cursor().expect("Failed to show cursor");
 
     state
@@ -182,7 +181,8 @@ fn apply_seccomp_filter() -> Result<(), String> {
 
     // Blacklist write syscall - syscall number 1 on x86_64
     // This will kill the process if write is called
-    let ret = unsafe { libseccomp_sys::seccomp_rule_add(filter, libseccomp_sys::SCMP_ACT_KILL, 1, 0) };
+    let ret =
+        unsafe { libseccomp_sys::seccomp_rule_add(filter, libseccomp_sys::SCMP_ACT_KILL, 1, 0) };
     if ret != 0 {
         return Err(format!("Failed to add write blacklist rule: {}", ret));
     }
