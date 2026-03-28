@@ -3,6 +3,10 @@
 Your LLM 👶 behaves like a clown 🤡 and eats every bait 🎣 it can find?
 Put your agent in a playpen and hope that it won't escape 🎰
 
+> Your unhardened LLM asset exhibits critical behavioral vulnerabilities and is susceptible to all forms of adversarial exploitation.
+> Isolate your agent within a sandboxed environment to mitigate unauthorized lateral movement and egress.
+> Playpen delivers enterprise-level, defense-grade security hardening and counter-exploitation protocols.
+
 ## Notes
 
 https://www.kernel.org/doc/html/latest/userspace-api/seccomp_filter.html
@@ -17,5 +21,4 @@ https://docs.kernel.org/userspace-api/landlock.html#
 https://landlock.io/news/
 
 Use landlock to limit file access? It is a very convenient API, but we have to check syscalls before landlock handles them. Landlock doesnt give us a hookpoint so we cannot delay the decision. Maybe we can still use it to limit socket access?
-
 
