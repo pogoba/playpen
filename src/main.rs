@@ -159,12 +159,16 @@ fn show_confirmation_prompt() -> ConfirmationState {
     state
 }
 
-fn request_syscall_permission(syscall: i64, args: [u64; 6]) -> bool {
+fn request_syscall_permission(syscall: i64, args: [u64; 6], prompt: bool) -> bool {
     if !std::io::stdout().is_terminal() {
         eprintln!(
             "Intercepted syscall {}, allowing by default because terminal is not available.",
             syscall
         );
+        return true;
+    }
+
+    if !prompt {
         return true;
     }
 
@@ -331,7 +335,7 @@ fn install_seccomp_listener(sender: &fd_portal::FdPortalSender) -> Result<(), St
     Ok(())
 }
 
-fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
+fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool) -> io::Result<()> {
     let fd = listener.into_raw_fd();
     unsafe {
         let mut req = ptr::null_mut();
@@ -352,7 +356,7 @@ fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
             }
 
             let args = (*req).data.args;
-            let allow = request_syscall_permission((*req).data.nr as i64, args);
+            let allow = request_syscall_permission((*req).data.nr as i64, args, prompt);
             if !allow {
                 (*resp).id = (*req).id;
                 (*resp).val = 0;
@@ -453,7 +457,7 @@ fn main() {
 
             match receiver.recv_fd() {
                 Ok(listener) => {
-                    if let Err(err) = handle_seccomp_notifications(listener) {
+                    if let Err(err) = handle_seccomp_notifications(listener, !cli.no_confirm) {
                         eprintln!("seccomp notifier failed: {}", err);
                     }
                 }
