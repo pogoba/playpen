@@ -346,6 +346,15 @@ fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool) -> io::Result<(
         }
 
         let result = loop {
+            // we need to clear the buffer because the kernel will refuse to overwrite non-zeros
+            (*req).id = 0;
+            (*req).pid = 0;
+            (*req).flags = 0;
+            (*req).data.nr = 0;
+            (*req).data.arch = 0;
+            (*req).data.instruction_pointer = 0;
+            (*req).data.args = [0;6];
+
             let ret = libseccomp_sys::seccomp_notify_receive(fd, req);
             if ret < 0 {
                 let err = io::Error::last_os_error();
