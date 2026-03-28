@@ -19,6 +19,9 @@
       stable.rustfmt
       rust-analyzer
     ];
+    playpenDeps = [
+      pkgs.libseccomp
+    ];
   in {
 
     packages.x86_64-linux.hello = pkgs.hello;
@@ -31,14 +34,14 @@
       cargoLock = {
         lockFile = ./Cargo.lock;
       };
+      buildInputs = [ ] ++ playpenDeps;
     };
 
     devShells.x86_64-linux.default = pkgs.mkShell {
       RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
       buildInputs = [
         rustToolchain
-        # fenixPkgs.rust-analyzer
-      ];
+      ] ++ playpenDeps;
     };
 
   };
