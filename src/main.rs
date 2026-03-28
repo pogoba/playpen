@@ -46,9 +46,16 @@ fn show_confirmation_prompt() -> ConfirmationState {
 
     enable_raw_mode().expect("Failed to enable raw mode");
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).expect("Failed to enter alternate screen");
+    // Don't use EnterAlternateScreen - just enable mouse capture
+    execute!(stdout, EnableMouseCapture).expect("Failed to enable mouse capture");
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).expect("Failed to create terminal");
+
+    // Scroll terminal up by 3 lines to make room for selector at bottom
+    execute!(
+        std::io::stdout(),
+        crossterm::terminal::ScrollUp(3)
+    ).expect("Failed to scroll terminal");
 
     let mut state = ConfirmationState::Pending;
     let mut selected = 0; // 0 = start, 1 = abort
@@ -56,39 +63,44 @@ fn show_confirmation_prompt() -> ConfirmationState {
     loop {
         terminal.draw(|f| {
             let size = f.area();
+
+            // Draw minimal selector at the bottom
+            let selector_height = 3;
+            let selector_area = ratatui::layout::Rect::new(
+                0,
+                size.height.saturating_sub(selector_height as u16),
+                size.width,
+                selector_height,
+            );
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
+                    Constraint::Length(1), // Status line
                     Constraint::Min(0),
-                    Constraint::Length(3),
                 ])
-                .split(size);
+                .split(selector_area);
 
-            // Title
-            let title = Paragraph::new(Line::from(vec![
-                Span::styled("Playpen", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(" - Command Runner"),
+            // Status line
+            let status = Paragraph::new(Line::from(vec![
+                Span::raw("Playpen: "),
+                Span::styled(
+                    if selected == 0 { "Start" } else { "Abort" },
+                    if selected == 0 {
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    },
+                ),
+                Span::raw(" (↑/↓ to select, Enter to confirm, Esc to abort)"),
             ]))
-            .block(Block::default().borders(Borders::ALL).title(" Confirmation "))
             .style(Style::default());
-            f.render_widget(title, chunks[0]);
-
-            // Instructions
-            let instructions = Paragraph::new(vec![
-                Line::from(""),
-                Line::from(vec![
-                    Span::raw("What would you like to do? (use ↑/↓ to navigate, Enter to confirm)"),
-                ]),
-                Line::from(""),
-            ])
-            .block(Block::default().borders(Borders::ALL).title(" Instructions "))
-            .style(Style::default());
-            f.render_widget(instructions, chunks[1]);
+            f.render_widget(status, chunks[0]);
 
             // Options
             let options = vec![
                 Line::from(vec![
+                    Span::raw("  "),
                     Span::styled(
                         "► Start command",
                         if selected == 0 {
@@ -99,6 +111,7 @@ fn show_confirmation_prompt() -> ConfirmationState {
                     ),
                 ]),
                 Line::from(vec![
+                    Span::raw("  "),
                     Span::styled(
                         "  Abort",
                         if selected == 1 {
@@ -110,9 +123,8 @@ fn show_confirmation_prompt() -> ConfirmationState {
                 ]),
             ];
             let options_widget = Paragraph::new(options)
-                .block(Block::default().borders(Borders::ALL).title(" Options "))
                 .style(Style::default());
-            f.render_widget(options_widget, chunks[2]);
+            f.render_widget(options_widget, chunks[1]);
         })
         .expect("Failed to draw terminal");
 
@@ -150,10 +162,9 @@ fn show_confirmation_prompt() -> ConfirmationState {
     disable_raw_mode().expect("Failed to disable raw mode");
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
     )
-    .expect("Failed to leave alternate screen");
+    .expect("Failed to disable mouse capture");
     terminal.show_cursor().expect("Failed to show cursor");
 
     state
@@ -187,11 +198,15 @@ fn main() {
     if !cli.no_confirm {
         match show_confirmation_prompt() {
             ConfirmationState::Aborted => {
+                eprintln!(); // newline after TUI
                 eprintln!("Aborted by user");
                 std::process::exit(1);
             }
-            ConfirmationState::Confirmed => {}
+            ConfirmationState::Confirmed => {
+                eprintln!(); // newline after TUI
+            }
             ConfirmationState::Pending => {
+                eprintln!(); // newline after TUI
                 eprintln!("No confirmation received");
                 std::process::exit(1);
             }
