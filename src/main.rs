@@ -7,6 +7,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use fd_portal::FdPortal;
+use nix::errno::Errno;
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -284,7 +285,7 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], prompt: bool) -> boo
     state
 }
 
-fn install_seccomp_listener(sender: &fd_portal::FdPortalSender) -> Result<(), String> {
+fn enable_seccomp(sender: &fd_portal::FdPortalSender) -> Result<(), String> {
     let ctx = unsafe { libseccomp_sys::seccomp_init(libseccomp_sys::SCMP_ACT_ALLOW) };
     if ctx.is_null() {
         return Err("Failed to initialize seccomp filter".to_string());
@@ -358,6 +359,7 @@ fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool) -> io::Result<(
             let ret = libseccomp_sys::seccomp_notify_receive(fd, req);
             if ret < 0 {
                 let err = io::Error::last_os_error();
+                eprintln!("seccomp_notify_receive failed ret {}, err {}", ret, err);
                 match err.raw_os_error() {
                     Some(libc::EBADF) | Some(libc::EINVAL) => break Ok(()),
                     _ => break Err(err),
@@ -373,6 +375,7 @@ fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool) -> io::Result<(
                 (*resp).flags = 0;
 
                 if libseccomp_sys::seccomp_notify_respond(fd, resp) < 0 {
+                    eprintln!("seccomp_notify_respond (EPERM) failed");
                     break Err(io::Error::last_os_error());
                 }
                 continue;
@@ -388,6 +391,7 @@ fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool) -> io::Result<(
 
             if libseccomp_sys::seccomp_notify_respond(fd, resp) < 0 {
                 let err = io::Error::last_os_error();
+                eprintln!("seccom_notify_respond (CONTINUE) failed");
                 break Err(err);
             }
         };
@@ -437,8 +441,8 @@ fn main() {
         }
         0 => {
             drop(receiver);
-            if let Err(err) = install_seccomp_listener(&sender) {
-                eprintln!("Failed to set up seccomp listener: {}", err);
+            if let Err(err) = enable_seccomp(&sender) {
+                eprintln!("Failed to enable seccomp: {}", err);
                 std::process::exit(1);
             }
 
@@ -455,10 +459,12 @@ fn main() {
 
             let program_ptr = c_args_ptrs[0];
             let argv_ptr = c_args_ptrs.as_ptr() as *const *const libc::c_char;
-            unsafe {
-                libc::execvp(program_ptr, argv_ptr);
+            let ret = unsafe { libc::execvp(program_ptr, argv_ptr) };
+            if ret == -1 {
+                eprintln!("Failed to execve child"); // errno will be set by execve
+                std::process::exit(Errno::last_raw());
             }
-            std::process::exit(1);
+            unreachable!();
         }
         pid => {
             drop(sender);
@@ -479,11 +485,16 @@ fn main() {
             let mut status: libc::c_int = 0;
             unsafe { libc::waitpid(pid, &mut status, 0) };
 
-            std::process::exit(if libc::WIFEXITED(status) {
-                libc::WEXITSTATUS(status)
+            // println!("fzz {}", status);
+            if libc::WIFEXITED(status) {
+                std::process::exit(libc::WEXITSTATUS(status));
+                // std::process::exit(status & 0xFF) // this is what WEXITSTATUS should do
+            } else if libc::WIFSIGNALED(status) {
+                eprintln!("Child was terminated by signal {}", libc::WTERMSIG(status));
+                std::process::exit(1);
             } else {
-                1
-            });
+                std::process::exit(123);
+            }
         }
     }
 }
