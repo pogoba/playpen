@@ -426,6 +426,11 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, pr
     execute!(terminal.backend_mut(), DisableMouseCapture,)
         .expect("Failed to disable mouse capture");
     terminal.show_cursor().expect("Failed to show cursor");
+    println!();
+    println!();
+    println!();
+    std::io::stdout().flush().ok();
+
 
     state
 }
@@ -551,9 +556,6 @@ fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool) -> io::Result<(
             (*resp).val = 0;
             (*resp).error = 0;
             (*resp).flags = libseccomp_sys::SECCOMP_USER_NOTIF_FLAG_CONTINUE;
-
-            println!();
-            std::io::stdout().flush().ok();
 
             if libseccomp_sys::seccomp_notify_respond(fd, resp) < 0 {
                 let err = io::Error::last_os_error();
