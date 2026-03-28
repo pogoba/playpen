@@ -7,6 +7,8 @@ edition = "2024"
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 libseccomp-sys = "0.3"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [[bin]]
 name = "playpen"
