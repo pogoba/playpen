@@ -307,6 +307,22 @@ fn enable_seccomp(sender: &fd_portal::FdPortalSender) -> Result<(), String> {
         ));
     }
 
+    let openat_notif = unsafe {
+        libseccomp_sys::seccomp_rule_add(
+            ctx,
+            libseccomp_sys::SECCOMP_RET_USER_NOTIF,
+            libc::SYS_openat as libc::c_int,
+            0,
+        )
+    };
+    if openat_notif != 0 {
+        unsafe { libseccomp_sys::seccomp_release(ctx) };
+        return Err(format!(
+            "Failed to install openat notification rule: {}",
+            openat_notif
+        ));
+    }
+
     let load_result = unsafe { libseccomp_sys::seccomp_load(ctx) };
     if load_result != 0 {
         unsafe {
