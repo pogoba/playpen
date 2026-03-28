@@ -20,7 +20,6 @@ use std::io::{self, IsTerminal};
 use std::os::fd::IntoRawFd;
 use std::os::unix::io::OwnedFd;
 use std::ptr;
-use std::thread;
 
 #[derive(Parser)]
 #[command(name = "playpen")]
@@ -166,52 +165,39 @@ fn install_seccomp_listener(sender: &fd_portal::FdPortalSender) -> Result<(), St
         return Err("Failed to initialize seccomp filter".to_string());
     }
 
-    let write_rule = unsafe {
+    let write_notif = unsafe {
         libseccomp_sys::seccomp_rule_add(
             ctx,
-            libseccomp_sys::SCMP_ACT_KILL,
+            libseccomp_sys::SECCOMP_RET_USER_NOTIF,
             libc::SYS_write as libc::c_int,
             0,
         )
     };
-    if write_rule != 0 {
+    if write_notif != 0 {
         unsafe { libseccomp_sys::seccomp_release(ctx) };
         return Err(format!(
-            "Failed to add write blacklist rule: {}",
-            write_rule
+            "Failed to install write notification rule: {}",
+            write_notif
         ));
-    }
-
-    let mount_rule = unsafe {
-        libseccomp_sys::seccomp_rule_add(
-            ctx,
-            libseccomp_sys::SECCOMP_RET_USER_NOTIF,
-            libc::SYS_mount as libc::c_int,
-            0,
-        )
-    };
-    if mount_rule != 0 {
-        unsafe { libseccomp_sys::seccomp_release(ctx) };
-        return Err(format!(
-            "Failed to install mount notification rule: {}",
-            mount_rule
-        ));
-    }
-
-    let notify_fd =
-        unsafe { libseccomp_sys::seccomp_notify_fd(ctx as libseccomp_sys::const_scmp_filter_ctx) };
-    if notify_fd < 0 {
-        unsafe { libseccomp_sys::seccomp_release(ctx) };
-        return Err("Failed to retrieve seccomp notification fd".to_string());
     }
 
     let load_result = unsafe { libseccomp_sys::seccomp_load(ctx) };
     if load_result != 0 {
         unsafe {
-            libc::close(notify_fd);
             libseccomp_sys::seccomp_release(ctx);
         }
         return Err(format!("Failed to load seccomp filter: {}", load_result));
+    }
+
+    let notify_fd =
+        unsafe { libseccomp_sys::seccomp_notify_fd(ctx as libseccomp_sys::const_scmp_filter_ctx) };
+    if notify_fd < 0 {
+        let err = io::Error::last_os_error();
+        unsafe { libseccomp_sys::seccomp_release(ctx) };
+        return Err(format!(
+            "Failed to retrieve seccomp notification fd (is user notification supported?): {}",
+            err
+        ));
     }
 
     unsafe { libseccomp_sys::seccomp_release(ctx) };
@@ -221,28 +207,7 @@ fn install_seccomp_listener(sender: &fd_portal::FdPortalSender) -> Result<(), St
         .map_err(|err| format!("Failed to send seccomp listener: {err}"))?;
     unsafe { libc::close(notify_fd) };
 
-    trigger_mount_probe();
-
     Ok(())
-}
-
-fn trigger_mount_probe() {
-    const TARGET: &str = "/tmp/playpen_mount_probe";
-    let _ = std::fs::create_dir_all(TARGET);
-    let source_c = CString::new("/dev/sda").unwrap();
-    let target_c = CString::new(TARGET).unwrap();
-
-    unsafe {
-        libc::mount(
-            source_c.as_ptr(),
-            target_c.as_ptr(),
-            ptr::null(),
-            0,
-            ptr::null(),
-        );
-    }
-
-    let _ = std::fs::remove_dir_all(TARGET);
 }
 
 fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
@@ -256,8 +221,13 @@ fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
         }
 
         let result = loop {
-            if libseccomp_sys::seccomp_notify_receive(fd, req) < 0 {
-                break Err(io::Error::last_os_error());
+            let ret = libseccomp_sys::seccomp_notify_receive(fd, req);
+            if ret < 0 {
+                let err = io::Error::last_os_error();
+                match err.raw_os_error() {
+                    Some(libc::EBADF) | Some(libc::EINVAL) => break Ok(()),
+                    _ => break Err(err),
+                }
             }
 
             eprintln!(
@@ -267,16 +237,61 @@ fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
                 (*req).data.args
             );
 
+            let count = (*req).data.args[2] as usize;
+            let mut resp_val: i64 = 0;
+            let mut resp_err: i32 = 0;
+
+            if count > 0 {
+                let mut buffer = vec![0u8; count];
+                let local_iov = libc::iovec {
+                    iov_base: buffer.as_mut_ptr() as *mut _,
+                    iov_len: buffer.len(),
+                };
+                let remote_iov = libc::iovec {
+                    iov_base: (*req).data.args[1] as *mut _,
+                    iov_len: buffer.len(),
+                };
+
+                let read_bytes = libc::process_vm_readv(
+                    (*req).pid as libc::pid_t,
+                    &local_iov,
+                    1,
+                    &remote_iov,
+                    1,
+                    0,
+                );
+
+                if read_bytes < 0 {
+                    resp_err = -io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EFAULT);
+                } else {
+                    let to_write = read_bytes as usize;
+                    let write_res = libc::write(
+                        (*req).data.args[0] as libc::c_int,
+                        buffer.as_ptr() as *const _,
+                        to_write,
+                    );
+
+                    if write_res < 0 {
+                        resp_err = -io::Error::last_os_error()
+                            .raw_os_error()
+                            .unwrap_or(libc::EIO);
+                    } else {
+                        resp_val = write_res as i64;
+                    }
+                }
+            }
+
             (*resp).id = (*req).id;
-            (*resp).val = 0;
-            (*resp).error = -libc::EPERM;
+            (*resp).val = resp_val;
+            (*resp).error = resp_err;
             (*resp).flags = 0;
 
             if libseccomp_sys::seccomp_notify_respond(fd, resp) < 0 {
-                break Err(io::Error::last_os_error());
+                let err = io::Error::last_os_error();
+                break Err(err);
             }
-
-            break Ok(());
         };
 
         libseccomp_sys::seccomp_notify_free(req, resp);
@@ -351,24 +366,20 @@ fn main() {
             drop(sender);
             println!("Child PID: {}", pid);
 
-            let notifier = match receiver.recv_fd() {
-                Ok(listener) => Some(thread::spawn(move || {
+            match receiver.recv_fd() {
+                Ok(listener) => {
                     if let Err(err) = handle_seccomp_notifications(listener) {
                         eprintln!("seccomp notifier failed: {}", err);
                     }
-                })),
-                Err(err) => {
-                    eprintln!("Failed to receive seccomp listener: {}", err);
-                    None
                 }
-            };
+                Err(err) => eprintln!(
+                    "Failed to receive seccomp listener (child may have exited before sharing it): {}",
+                    err
+                ),
+            }
 
             let mut status: libc::c_int = 0;
             unsafe { libc::waitpid(pid, &mut status, 0) };
-
-            if let Some(handle) = notifier {
-                let _ = handle.join();
-            }
 
             std::process::exit(if libc::WIFEXITED(status) {
                 libc::WEXITSTATUS(status)
