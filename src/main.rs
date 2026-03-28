@@ -16,7 +16,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 use std::ffi::CString;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::os::fd::IntoRawFd;
 use std::os::unix::io::OwnedFd;
 use std::ptr;
@@ -156,6 +156,130 @@ fn show_confirmation_prompt() -> ConfirmationState {
         .expect("Failed to disable mouse capture");
     terminal.show_cursor().expect("Failed to show cursor");
 
+    println!();
+    println!();
+    std::io::stdout().flush().ok();
+    state
+}
+
+fn request_syscall_permission(syscall: i64, args: [u64; 6]) -> bool {
+    if !std::io::stdout().is_terminal() {
+        eprintln!(
+            "Intercepted syscall {}, allowing by default because terminal is not available.",
+            syscall
+        );
+        return true;
+    }
+
+    println!();
+    enable_raw_mode().expect("Failed to enable raw mode");
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnableMouseCapture).expect("Failed to enable mouse capture");
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).expect("Failed to create terminal");
+    execute!(std::io::stdout(), crossterm::terminal::ScrollUp(3))
+        .expect("Failed to scroll terminal");
+
+    let args_line = args
+        .iter()
+        .map(|a| format!("{a:#x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut selected = 0;
+    let state = loop {
+        terminal
+            .draw(|f| {
+                let size = f.area();
+                let selector_height = 5;
+                let selector_area = ratatui::layout::Rect::new(
+                    0,
+                    size.height.saturating_sub(selector_height as u16),
+                    size.width,
+                    selector_height,
+                );
+
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(2), Constraint::Min(0)])
+                    .split(selector_area);
+
+                let detail = Paragraph::new(Line::from(vec![
+                    Span::raw("Intercepted syscall: "),
+                    Span::styled(
+                        format!("{}", syscall),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::raw("args: "),
+                    Span::raw(args_line.clone()),
+                ]))
+                .style(Style::default());
+                f.render_widget(detail, chunks[0]);
+
+                let options = vec![
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            "► Allow",
+                            if selected == 0 {
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            "  Deny",
+                            if selected == 1 {
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ]),
+                ];
+                let options_widget = Paragraph::new(options).style(Style::default());
+                f.render_widget(options_widget, chunks[1]);
+            })
+            .expect("Failed to draw terminal");
+
+        if let Event::Key(key) = event::read().expect("Failed to read event") {
+            if key.kind == KeyEventKind::Press {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if selected > 0 {
+                            selected -= 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if selected < 1 {
+                            selected += 1;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        break selected == 0;
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        break false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    disable_raw_mode().expect("Failed to disable raw mode");
+    execute!(terminal.backend_mut(), DisableMouseCapture,)
+        .expect("Failed to disable mouse capture");
+    terminal.show_cursor().expect("Failed to show cursor");
+
     state
 }
 
@@ -230,12 +354,19 @@ fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
                 }
             }
 
-            eprintln!(
-                "[playpen] intercepted syscall {} from pid {} with args {:?}",
-                (*req).data.nr,
-                (*req).pid,
-                (*req).data.args
-            );
+            let args = (*req).data.args;
+            let allow = request_syscall_permission((*req).data.nr as i64, args);
+            if !allow {
+                (*resp).id = (*req).id;
+                (*resp).val = 0;
+                (*resp).error = -libc::EPERM;
+                (*resp).flags = 0;
+
+                if libseccomp_sys::seccomp_notify_respond(fd, resp) < 0 {
+                    break Err(io::Error::last_os_error());
+                }
+                continue;
+            }
 
             let count = (*req).data.args[2] as usize;
             let mut resp_val: i64 = 0;
@@ -292,6 +423,12 @@ fn handle_seccomp_notifications(listener: OwnedFd) -> io::Result<()> {
                 let err = io::Error::last_os_error();
                 break Err(err);
             }
+
+            println!(
+                "[playpen] emulated write of {} bytes for pid {}",
+                resp_val,
+                (*req).pid
+            );
         };
 
         libseccomp_sys::seccomp_notify_free(req, resp);
