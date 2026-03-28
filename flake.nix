@@ -42,10 +42,12 @@
       RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
       buildInputs = [
         rustToolchain
+        pkgs.gdb
       ] ++ playpenDeps;
       shellHook = ''
         export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.libseccomp.lib}/lib"
       '';
+      hardeningDisable = [ "all" ];
     };
 
   };
