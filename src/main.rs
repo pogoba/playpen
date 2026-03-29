@@ -441,21 +441,42 @@ fn enable_seccomp(sender: &fd_portal::FdPortalSender) -> Result<(), String> {
         return Err("Failed to initialize seccomp filter".to_string());
     }
 
-    let write_notif = unsafe {
-        libseccomp_sys::seccomp_rule_add(
-            ctx,
-            libseccomp_sys::SECCOMP_RET_USER_NOTIF,
-            libc::SYS_write as libc::c_int,
-            0,
-        )
-    };
-    if write_notif != 0 {
-        unsafe { libseccomp_sys::seccomp_release(ctx) };
-        return Err(format!(
-            "Failed to install write notification rule: {}",
-            write_notif
-        ));
-    }
+
+    // deny by default
+    //
+    // allow: read only, benign, or guarded by our fd creation guards
+    // BASIC_IO, DEFAULT (execve can at best read binaries), CLOCK, TIMER, CPU_EMULATION, IO_EVENT, MEMLOCK, RESOURCES, SYNC, AIO
+    //
+    // check path or ip args:
+    // CHOWN, FILE_SYSTEM, KEYRING, MODULE, MOUNT, SETUID,
+    //
+    //
+    // check or guard through network namespace: NETWORK_IO,
+    //
+    // check or guard through process namespace: DEBUG, IPC, PROCESS, SIGNAL
+    //
+    // check or deny: PRIVILEGED (CHOWN, CLOCK, MODULE, RAW_IO, REBOOT, SWAP)
+    //
+    // deny: OBSOLETE, PKEY, RAW_IO, REBOOT, SANDBOX, SWAP
+    //
+    // not sure: SYSTEM_SERVICE is a mixed bag of new calls and ones defined elsewhere
+
+
+    // let write_notif = unsafe {
+    //     libseccomp_sys::seccomp_rule_add(
+    //         ctx,
+    //         libseccomp_sys::SECCOMP_RET_USER_NOTIF,
+    //         libc::SYS_write as libc::c_int,
+    //         0,
+    //     )
+    // };
+    // if write_notif != 0 {
+    //     unsafe { libseccomp_sys::seccomp_release(ctx) };
+    //     return Err(format!(
+    //         "Failed to install write notification rule: {}",
+    //         write_notif
+    //     ));
+    // }
 
     let openat_notif = unsafe {
         libseccomp_sys::seccomp_rule_add(
