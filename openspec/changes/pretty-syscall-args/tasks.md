@@ -1,9 +1,9 @@
 ## 1. Create fmt_syscall module and migrate existing code
 
-- [ ] 1.1 Create `src/fmt_syscall.rs` with `format_syscall_args(syscall: i64, args: [u64; 6], pid: pid_t) -> Vec<(&str, String)>` entry point
-- [ ] 1.2 Move `read_cstring_from_pid` from main.rs into fmt_syscall.rs (make it `pub(crate)`)
-- [ ] 1.3 Move `format_open_flags` from main.rs into fmt_syscall.rs
-- [ ] 1.4 Add `mod fmt_syscall` to main.rs, update call sites to use the new module
+- [x] 1.1 Create `src/fmt_syscall.rs` with `format_syscall_args(syscall: i64, args: [u64; 6], pid: pid_t) -> Vec<(&str, String)>` entry point
+- [x] 1.2 Move `read_cstring_from_pid` from main.rs into fmt_syscall.rs (make it `pub(crate)`)
+- [x] 1.3 Move `format_open_flags` from main.rs into fmt_syscall.rs
+- [x] 1.4 Add `mod fmt_syscall` to main.rs, update call sites to use the new module
 
 ## 2. Implement per-class formatters
 
