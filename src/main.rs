@@ -178,7 +178,7 @@ fn is_immutable(flags: u64) -> bool {
 }
 
 
-fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, prompt: bool) -> bool {
+fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, prompt: bool, syscall_map: &std::collections::HashMap<i32, &str>) -> bool {
     if syscall == libc::SYS_openat as i64 && is_immutable(args[2]) {
         return true;
     }
@@ -195,6 +195,10 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, pr
         return true;
     }
 
+    let formatted_args = fmt_syscall::format_syscall_args(syscall, args, pid);
+    let name = syscall_map.get(&(syscall as i32)).copied().unwrap_or("unknown");
+    let syscall_label = format!("{} ({})", name, syscall);
+
     println!();
     enable_raw_mode().expect("Failed to enable raw mode");
     let mut stdout = std::io::stdout();
@@ -204,45 +208,19 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, pr
     execute!(std::io::stdout(), crossterm::terminal::ScrollUp(3))
         .expect("Failed to scroll terminal");
 
-    let args_line = args
-        .iter()
-        .map(|a| format!("{a:#x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let syscall_label = if syscall == libc::SYS_openat as i64 {
-        format!("openat ({})", syscall)
-    } else {
-        format!("{}", syscall)
-    };
-
-    let openat_path = if syscall == libc::SYS_openat as i64 {
-        match fmt_syscall::read_cstring_from_pid(pid, args[1]) {
-            Ok(path) => Some(path),
-            Err(_) => Some("<unreadable>".to_string()),
-        }
-    } else {
-        None
-    };
-
-    let openat_flags = if syscall == libc::SYS_openat as i64 {
-        Some(fmt_syscall::format_open_flags(args[2]))
-    } else {
-        None
-    };
-
+    // 1 line for syscall header + 1 line per formatted arg + 2 lines for options
+    let detail_lines_len = 1 + formatted_args.len();
     let mut selected = 0;
     let state = loop {
         terminal
             .draw(|f| {
                 let size = f.area();
-                let detail_lines_len = if openat_path.is_some() { 4 } else { 2 };
                 let selector_height = detail_lines_len + 3;
                 let selector_area = ratatui::layout::Rect::new(
                     0,
                     size.height.saturating_sub(selector_height as u16),
                     size.width,
-                    selector_height,
+                    selector_height as u16,
                 );
 
                 let chunks = Layout::default()
@@ -258,27 +236,14 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, pr
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(" "),
-                    Span::raw("args: "),
-                    Span::raw(args_line.clone()),
                 ])];
 
-                if let Some(path) = &openat_path {
+                for (label, value) in &formatted_args {
                     detail_lines.push(Line::from(vec![
-                        Span::raw("path: "),
+                        Span::raw(format!("{}: ", label)),
                         Span::styled(
-                            path.clone(),
+                            value.clone(),
                             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
-                }
-
-                if let Some(flags) = &openat_flags {
-                    detail_lines.push(Line::from(vec![
-                        Span::raw("flags: "),
-                        Span::styled(
-                            flags.clone(),
-                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
                         ),
                     ]));
                 }
@@ -351,17 +316,18 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, pr
     println!();
     std::io::stdout().flush().ok();
 
-
     state
 }
 
-fn enable_seccomp(sender: &fd_portal::FdPortalSender) -> Result<(), String> {
+fn enable_seccomp(sender: &fd_portal::FdPortalSender, syscall_map: &std::collections::HashMap<i32, &str>) -> Result<(), String> {
     let ctx = unsafe { libseccomp_sys::seccomp_init(libseccomp_sys::SCMP_ACT_ALLOW) };
     if ctx.is_null() {
         return Err("Failed to initialize seccomp filter".to_string());
     }
 
 
+    // Notes: (leave this comment in)
+    //
     // deny by default
     //
     // allow: read only, benign, or guarded by our fd creation guards
@@ -380,8 +346,8 @@ fn enable_seccomp(sender: &fd_portal::FdPortalSender) -> Result<(), String> {
     // deny: OBSOLETE, PKEY, RAW_IO, REBOOT, SANDBOX, SWAP
     //
     // not sure: SYSTEM_SERVICE is a mixed bag of new calls and ones defined elsewhere
-
-
+    //
+    //
     // let write_notif = unsafe {
     //     libseccomp_sys::seccomp_rule_add(
     //         ctx,
@@ -397,21 +363,38 @@ fn enable_seccomp(sender: &fd_portal::FdPortalSender) -> Result<(), String> {
     //         write_notif
     //     ));
     // }
+    //
+    // let openat_notif = unsafe {
+    //     libseccomp_sys::seccomp_rule_add(
+    //         ctx,
+    //         libseccomp_sys::SECCOMP_RET_USER_NOTIF,
+    //         libc::SYS_openat as libc::c_int,
+    //         0,
+    //     )
+    // };
+    // if openat_notif != 0 {
+    //     unsafe { libseccomp_sys::seccomp_release(ctx) };
+    //     return Err(format!(
+    //         "Failed to install openat notification rule: {}",
+    //         openat_notif
+    //     ));
 
-    let openat_notif = unsafe {
-        libseccomp_sys::seccomp_rule_add(
-            ctx,
-            libseccomp_sys::SECCOMP_RET_USER_NOTIF,
-            libc::SYS_openat as libc::c_int,
-            0,
-        )
-    };
-    if openat_notif != 0 {
-        unsafe { libseccomp_sys::seccomp_release(ctx) };
-        return Err(format!(
-            "Failed to install openat notification rule: {}",
-            openat_notif
-        ));
+    for &sys in syscall_map.keys() {
+        let ret = unsafe {
+            libseccomp_sys::seccomp_rule_add(
+                ctx,
+                libseccomp_sys::SECCOMP_RET_USER_NOTIF,
+                sys as libc::c_int,
+                0,
+            )
+        };
+        if ret != 0 {
+            unsafe { libseccomp_sys::seccomp_release(ctx) };
+            return Err(format!(
+                "Failed to install notification rule for syscall {}: {}",
+                sys, ret
+            ));
+        }
     }
 
     let load_result = unsafe { libseccomp_sys::seccomp_load(ctx) };
@@ -443,7 +426,7 @@ fn enable_seccomp(sender: &fd_portal::FdPortalSender) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool) -> io::Result<()> {
+fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool, syscall_map: &std::collections::HashMap<i32, &str>) -> io::Result<()> {
     let fd = listener.into_raw_fd();
     unsafe {
         let mut req = ptr::null_mut();
@@ -479,6 +462,7 @@ fn handle_seccomp_notifications(listener: OwnedFd, prompt: bool) -> io::Result<(
                 args,
                 (*req).pid as libc::pid_t,
                 prompt,
+                syscall_map,
             );
             if !allow {
                 (*resp).id = (*req).id;
@@ -532,6 +516,16 @@ fn main() {
         }
     }
 
+    // Build syscall number → name map from syscalls.rs filter sets
+    let syscall_map = syscalls::resolve_syscall_map(&[
+        &syscalls::CHOWN,
+        &syscalls::FILE_SYSTEM,
+        &syscalls::KEYRING,
+        &syscalls::MODULE,
+        &syscalls::MOUNT,
+        &syscalls::SETUID,
+    ]);
+
     let portal = match FdPortal::new() {
         Ok(portal) => portal,
         Err(err) => {
@@ -550,7 +544,7 @@ fn main() {
         }
         0 => {
             drop(receiver);
-            if let Err(err) = enable_seccomp(&sender) {
+            if let Err(err) = enable_seccomp(&sender, &syscall_map) {
                 eprintln!("Failed to enable seccomp: {}", err);
                 std::process::exit(1);
             }
@@ -581,7 +575,7 @@ fn main() {
 
             match receiver.recv_fd() {
                 Ok(listener) => {
-                    if let Err(err) = handle_seccomp_notifications(listener, !cli.no_confirm) {
+                    if let Err(err) = handle_seccomp_notifications(listener, !cli.no_confirm, &syscall_map) {
                         eprintln!("seccomp notifier failed: {}", err);
                     }
                 }
