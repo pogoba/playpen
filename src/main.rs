@@ -1,5 +1,6 @@
 mod fd_portal;
 mod fmt_syscall;
+mod syscalls;
 
 use clap::Parser;
 use crossterm::{

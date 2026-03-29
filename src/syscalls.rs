@@ -768,3 +768,41 @@ pub const ALL_SETS: &[&SyscallFilterSet] = &[
 pub fn find_set(name: &str) -> Option<&'static SyscallFilterSet> {
     ALL_SETS.iter().find(|s| s.name == name).copied()
 }
+
+use std::collections::HashMap;
+use std::ffi::CString;
+
+/// Build a map from syscall number → name for the given filter sets.
+///
+/// Recursively expands `@group` references. Uses libseccomp's
+/// `seccomp_syscall_resolve_name()` to resolve each name string to its
+/// architecture-specific syscall number. Unknown names (returning -1) are
+/// silently skipped.
+pub fn resolve_syscall_map(sets: &[&SyscallFilterSet]) -> HashMap<i32, &'static str> {
+    let mut map = HashMap::new();
+    for set in sets {
+        collect_into(&mut map, set);
+    }
+    map
+}
+
+fn collect_into(map: &mut HashMap<i32, &'static str>, set: &SyscallFilterSet) {
+    for &entry in set.syscalls {
+        if let Some(group_name) = entry.strip_prefix('@') {
+            // Expand @group reference
+            let full_name = format!("@{}", group_name);
+            if let Some(sub) = find_set(&full_name) {
+                collect_into(map, sub);
+            }
+        } else {
+            if let Ok(cname) = CString::new(entry) {
+                let nr = unsafe {
+                    libseccomp_sys::seccomp_syscall_resolve_name(cname.as_ptr())
+                };
+                if nr >= 0 {
+                    map.insert(nr, entry);
+                }
+            }
+        }
+    }
+}
