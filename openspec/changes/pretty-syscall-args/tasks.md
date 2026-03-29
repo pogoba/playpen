@@ -17,5 +17,5 @@
 ## 3. Wire up dispatch and seccomp rules
 
 - [x] 3.1 Implement the match dispatch in `format_syscall_args` mapping `SYS_*` constants to the per-class formatters
-- [ ] 3.2 Update `enable_seccomp` to add `seccomp_rule_add` for all newly-formatted syscalls
-- [ ] 3.3 Update `request_syscall_permission` to call `format_syscall_args` and render the returned label-value pairs as TUI `Span`s, replacing the current openat-specific code
+- [x] 3.2 Update `enable_seccomp` to add `seccomp_rule_add` for all newly-formatted syscalls
+- [x] 3.3 Update `request_syscall_permission` to call `format_syscall_args` and render the returned label-value pairs as TUI `Span`s, replacing the current openat-specific code
