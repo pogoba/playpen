@@ -43,6 +43,7 @@
       buildInputs = [
         rustToolchain
         pkgs.gdb
+        pkgs.python3
       ] ++ playpenDeps;
       shellHook = ''
         export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:${pkgs.libseccomp.lib}/lib"
