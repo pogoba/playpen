@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::CString;
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -276,20 +276,6 @@ pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
             .map_err(|e| format!("apply {}: {}", entry.rel_path.display(), e))?;
     }
 
-    let mut clear_order: Vec<&Entry> = selected.iter().collect();
-    clear_order.sort_by(|a, b| b.rel_path.cmp(&a.rel_path));
-    for entry in clear_order {
-        if let Err(err) = clear_from_upper(entry, &args.upper) {
-            if err.raw_os_error() != Some(libc::ENOTEMPTY) {
-                eprintln!(
-                    "warning: failed to remove {} from upper: {}",
-                    entry.rel_path.display(),
-                    err
-                );
-            }
-        }
-    }
-
     let n = selected.len();
     println!(
         "Applied {} entr{} to {}",
@@ -323,6 +309,11 @@ fn scan_recursive(
         let ftype = meta.file_type();
 
         if is_whiteout(&meta) {
+            // Skip whiteouts that target a path that doesn't exist in lower —
+            // applying would be a no-op.
+            if !path_exists(&lower_path) {
+                continue;
+            }
             out.push(Entry {
                 rel_path: child_rel,
                 kind: ChangeKind::Deleted,
@@ -356,6 +347,11 @@ fn scan_recursive(
         }
 
         let kind = if path_exists(&lower_path) {
+            // Hide entries whose upper content already matches lower —
+            // there is nothing to merge.
+            if paths_content_equal(&upper_path, &lower_path).unwrap_or(false) {
+                continue;
+            }
             ChangeKind::Modified
         } else {
             ChangeKind::Added
@@ -368,6 +364,42 @@ fn scan_recursive(
         });
     }
     Ok(())
+}
+
+fn paths_content_equal(a: &Path, b: &Path) -> std::io::Result<bool> {
+    let ma = fs::symlink_metadata(a)?;
+    let mb = fs::symlink_metadata(b)?;
+    let ta = ma.file_type();
+    let tb = mb.file_type();
+    if ta.is_symlink() != tb.is_symlink() {
+        return Ok(false);
+    }
+    if ta.is_symlink() {
+        return Ok(fs::read_link(a)? == fs::read_link(b)?);
+    }
+    if !ta.is_file() || !tb.is_file() {
+        return Ok(false);
+    }
+    if ma.len() != mb.len() {
+        return Ok(false);
+    }
+    let mut fa = fs::File::open(a)?;
+    let mut fb = fs::File::open(b)?;
+    let mut ba = [0u8; 8192];
+    let mut bb = [0u8; 8192];
+    loop {
+        let na = fa.read(&mut ba)?;
+        let nb = fb.read(&mut bb)?;
+        if na != nb {
+            return Ok(false);
+        }
+        if na == 0 {
+            return Ok(true);
+        }
+        if ba[..na] != bb[..nb] {
+            return Ok(false);
+        }
+    }
 }
 
 fn path_exists(p: &Path) -> bool {
@@ -544,20 +576,6 @@ fn apply(entry: &Entry, upper: &Path, lower: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn clear_from_upper(entry: &Entry, upper: &Path) -> std::io::Result<()> {
-    let upper_path = upper.join(&entry.rel_path);
-    let meta = match fs::symlink_metadata(&upper_path) {
-        Ok(m) => m,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err),
-    };
-    if meta.file_type().is_dir() {
-        fs::remove_dir(&upper_path)
-    } else {
-        fs::remove_file(&upper_path)
-    }
 }
 
 fn create_parent(p: &Path) -> std::io::Result<()> {
