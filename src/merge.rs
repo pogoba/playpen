@@ -69,6 +69,176 @@ struct Entry {
     selected: bool,
 }
 
+struct TreeNode {
+    name: String,
+    full_path: PathBuf,
+    depth: usize,
+    is_dir: bool,
+    expanded: bool,
+    entry_idx: Option<usize>,
+    children: Vec<usize>,
+}
+
+struct Tree {
+    nodes: Vec<TreeNode>,
+    roots: Vec<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionState {
+    None,
+    Partial,
+    All,
+}
+
+fn build_tree(entries: &[Entry]) -> Tree {
+    let mut tree = Tree {
+        nodes: Vec::new(),
+        roots: Vec::new(),
+    };
+    let mut by_path: HashMap<PathBuf, usize> = HashMap::new();
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let mut accum = PathBuf::new();
+        let comps: Vec<_> = entry.rel_path.components().collect();
+        if comps.is_empty() {
+            continue;
+        }
+        let last = comps.len() - 1;
+
+        for (i, comp) in comps.iter().enumerate() {
+            accum.push(comp.as_os_str());
+            let is_last = i == last;
+            let entry_for_node = if is_last { Some(idx) } else { None };
+            let want_dir = !is_last || entry.is_dir;
+            let depth = i;
+
+            let parent_idx = if i == 0 {
+                None
+            } else {
+                let mut parent_path = accum.clone();
+                parent_path.pop();
+                Some(*by_path.get(&parent_path).expect("parent must exist"))
+            };
+
+            if let Some(&existing_idx) = by_path.get(&accum) {
+                if entry_for_node.is_some() {
+                    tree.nodes[existing_idx].entry_idx = entry_for_node;
+                }
+                continue;
+            }
+
+            let name = comp.as_os_str().to_string_lossy().into_owned();
+            let node_idx = tree.nodes.len();
+            tree.nodes.push(TreeNode {
+                name,
+                full_path: accum.clone(),
+                depth,
+                is_dir: want_dir,
+                expanded: true,
+                entry_idx: entry_for_node,
+                children: Vec::new(),
+            });
+            by_path.insert(accum.clone(), node_idx);
+
+            match parent_idx {
+                Some(p) => tree.nodes[p].children.push(node_idx),
+                None => tree.roots.push(node_idx),
+            }
+        }
+    }
+
+    // Sort each node's children: dirs first, then alphabetical.
+    fn sort_children(tree: &mut Tree, node_idx: usize) {
+        let mut child_ids: Vec<usize> = tree.nodes[node_idx].children.clone();
+        child_ids.sort_by(|&a, &b| {
+            let na = &tree.nodes[a];
+            let nb = &tree.nodes[b];
+            nb.is_dir
+                .cmp(&na.is_dir)
+                .then_with(|| na.name.cmp(&nb.name))
+        });
+        tree.nodes[node_idx].children = child_ids.clone();
+        for c in child_ids {
+            sort_children(tree, c);
+        }
+    }
+    let roots = tree.roots.clone();
+    tree.roots.sort_by(|&a, &b| {
+        let na = &tree.nodes[a];
+        let nb = &tree.nodes[b];
+        nb.is_dir
+            .cmp(&na.is_dir)
+            .then_with(|| na.name.cmp(&nb.name))
+    });
+    for r in roots {
+        sort_children(&mut tree, r);
+    }
+    tree
+}
+
+fn rebuild_visible(tree: &Tree, visible: &mut Vec<usize>) {
+    visible.clear();
+    fn walk(tree: &Tree, idx: usize, out: &mut Vec<usize>) {
+        out.push(idx);
+        let node = &tree.nodes[idx];
+        if node.is_dir && node.expanded {
+            for &c in &node.children {
+                walk(tree, c, out);
+            }
+        }
+    }
+    for &root in &tree.roots {
+        walk(tree, root, visible);
+    }
+}
+
+fn collect_descendant_entries(tree: &Tree, node_idx: usize, out: &mut Vec<usize>) {
+    let node = &tree.nodes[node_idx];
+    if let Some(i) = node.entry_idx {
+        out.push(i);
+    }
+    for &c in &node.children {
+        collect_descendant_entries(tree, c, out);
+    }
+}
+
+fn dir_selection_state(tree: &Tree, entries: &[Entry], node_idx: usize) -> SelectionState {
+    let mut idxs = Vec::new();
+    collect_descendant_entries(tree, node_idx, &mut idxs);
+    if idxs.is_empty() {
+        return SelectionState::None;
+    }
+    let sel = idxs.iter().filter(|&&i| entries[i].selected).count();
+    if sel == 0 {
+        SelectionState::None
+    } else if sel == idxs.len() {
+        SelectionState::All
+    } else {
+        SelectionState::Partial
+    }
+}
+
+fn toggle_node_selection(tree: &Tree, entries: &mut [Entry], node_idx: usize) {
+    let node = &tree.nodes[node_idx];
+    if !node.is_dir {
+        if let Some(i) = node.entry_idx {
+            entries[i].selected = !entries[i].selected;
+        }
+        return;
+    }
+    let mut idxs = Vec::new();
+    collect_descendant_entries(tree, node_idx, &mut idxs);
+    if idxs.is_empty() {
+        return;
+    }
+    let all = idxs.iter().all(|&i| entries[i].selected);
+    let target = !all;
+    for i in idxs {
+        entries[i].selected = target;
+    }
+}
+
 pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
     if !args.upper.is_dir() {
         return Err(format!("upper layer is not a directory: {}", args.upper.display()).into());
@@ -422,12 +592,34 @@ fn copy_meta(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 struct AppState {
     entries: Vec<Entry>,
+    tree: Tree,
+    visible: Vec<usize>,
     cursor: usize,
     list_state: ListState,
     diff_offset: u16,
     diff_cache: HashMap<usize, String>,
     upper: PathBuf,
     lower: PathBuf,
+}
+
+fn current_node(state: &AppState) -> usize {
+    state.visible[state.cursor.min(state.visible.len() - 1)]
+}
+
+fn refresh_visible_keep_cursor(state: &mut AppState) {
+    let prev_node = if state.visible.is_empty() {
+        None
+    } else {
+        Some(state.visible[state.cursor.min(state.visible.len() - 1)])
+    };
+    rebuild_visible(&state.tree, &mut state.visible);
+    if let Some(node) = prev_node {
+        if let Some(pos) = state.visible.iter().position(|&n| n == node) {
+            state.cursor = pos;
+            return;
+        }
+    }
+    state.cursor = state.cursor.min(state.visible.len().saturating_sub(1));
 }
 
 fn tui_loop(
@@ -441,10 +633,16 @@ fn tui_loop(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    let tree = build_tree(&entries);
+    let mut visible = Vec::new();
+    rebuild_visible(&tree, &mut visible);
+
     let mut list_state = ListState::default();
     list_state.select(Some(0));
     let mut state = AppState {
         entries,
+        tree,
+        visible,
         cursor: 0,
         list_state,
         diff_offset: 0,
@@ -456,10 +654,10 @@ fn tui_loop(
     let mut decision: Option<bool> = None;
 
     let loop_result: Result<(), Box<dyn Error>> = loop {
-        let cursor = state.cursor;
-        if !state.diff_cache.contains_key(&cursor) {
-            let text = diff_text(&state.entries[cursor], &state.upper, &state.lower);
-            state.diff_cache.insert(cursor, text);
+        let node_idx = current_node(&state);
+        if !state.diff_cache.contains_key(&node_idx) {
+            let text = node_diff_text(&state, node_idx);
+            state.diff_cache.insert(node_idx, text);
         }
         state.list_state.select(Some(state.cursor));
         if let Err(e) = terminal.draw(|f| draw(f, &mut state)) {
@@ -479,7 +677,7 @@ fn tui_loop(
                     decision = Some(false);
                     break Ok(());
                 }
-                (KeyCode::Char('A'), _) | (KeyCode::Enter, _) => {
+                (KeyCode::Char('A'), _) => {
                     decision = Some(true);
                     break Ok(());
                 }
@@ -490,14 +688,51 @@ fn tui_loop(
                     }
                 }
                 (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                    if state.cursor + 1 < state.entries.len() {
+                    if state.cursor + 1 < state.visible.len() {
                         state.cursor += 1;
                         state.diff_offset = 0;
                     }
                 }
                 (KeyCode::Char(' '), _) => {
-                    let i = state.cursor;
-                    state.entries[i].selected = !state.entries[i].selected;
+                    let n = current_node(&state);
+                    toggle_node_selection(&state.tree, &mut state.entries, n);
+                }
+                (KeyCode::Enter, _) | (KeyCode::Tab, _) => {
+                    let n = current_node(&state);
+                    if state.tree.nodes[n].is_dir {
+                        state.tree.nodes[n].expanded = !state.tree.nodes[n].expanded;
+                        refresh_visible_keep_cursor(&mut state);
+                    }
+                }
+                (KeyCode::Right, _) | (KeyCode::Char('l'), _) => {
+                    let n = current_node(&state);
+                    if state.tree.nodes[n].is_dir && !state.tree.nodes[n].expanded {
+                        state.tree.nodes[n].expanded = true;
+                        refresh_visible_keep_cursor(&mut state);
+                    } else if state.cursor + 1 < state.visible.len() {
+                        state.cursor += 1;
+                        state.diff_offset = 0;
+                    }
+                }
+                (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
+                    let n = current_node(&state);
+                    if state.tree.nodes[n].is_dir && state.tree.nodes[n].expanded {
+                        state.tree.nodes[n].expanded = false;
+                        refresh_visible_keep_cursor(&mut state);
+                    } else {
+                        // jump to parent dir if any
+                        let depth = state.tree.nodes[n].depth;
+                        if depth > 0 {
+                            for i in (0..state.cursor).rev() {
+                                let cand = state.visible[i];
+                                if state.tree.nodes[cand].depth < depth {
+                                    state.cursor = i;
+                                    state.diff_offset = 0;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 (KeyCode::Char('a'), m) if !m.contains(KeyModifiers::CONTROL) => {
                     let all = state.entries.iter().all(|e| e.selected);
@@ -535,6 +770,39 @@ fn tui_loop(
     }
 }
 
+fn node_diff_text(state: &AppState, node_idx: usize) -> String {
+    let node = &state.tree.nodes[node_idx];
+    if let Some(idx) = node.entry_idx {
+        return diff_text(&state.entries[idx], &state.upper, &state.lower);
+    }
+    // Implicit dir: no own entry; summarise descendants.
+    let mut idxs = Vec::new();
+    collect_descendant_entries(&state.tree, node_idx, &mut idxs);
+    if idxs.is_empty() {
+        return format!("-- empty subtree at {}\n", node.full_path.display());
+    }
+    let mut counts = [0usize; 4];
+    for &i in &idxs {
+        let k = match state.entries[i].kind {
+            ChangeKind::Added => 0,
+            ChangeKind::Modified => 1,
+            ChangeKind::Deleted => 2,
+            ChangeKind::OpaqueDir => 3,
+        };
+        counts[k] += 1;
+    }
+    let mut s = format!("-- directory: {}\n", node.full_path.display());
+    s.push_str(&format!(
+        "   {} added · {} modified · {} deleted · {} opaque\n\n",
+        counts[0], counts[1], counts[2], counts[3]
+    ));
+    for &i in &idxs {
+        let e = &state.entries[i];
+        s.push_str(&format!("   {} {}\n", e.kind.letter(), e.rel_path.display()));
+    }
+    s
+}
+
 fn draw(f: &mut ratatui::Frame, state: &mut AppState) {
     let area = f.area();
     let main = Layout::default()
@@ -547,20 +815,60 @@ fn draw(f: &mut ratatui::Frame, state: &mut AppState) {
         .split(main[0]);
 
     let items: Vec<ListItem> = state
-        .entries
+        .visible
         .iter()
-        .map(|e| {
-            let check = if e.selected { "[x]" } else { "[ ]" };
-            ListItem::new(Line::from(vec![
-                Span::raw(format!("{} ", check)),
-                Span::styled(
-                    format!("{} ", e.kind.letter()),
-                    Style::default()
-                        .fg(e.kind.color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(e.rel_path.display().to_string()),
-            ]))
+        .map(|&n| {
+            let node = &state.tree.nodes[n];
+            let indent = "  ".repeat(node.depth);
+            let mut spans: Vec<Span> = Vec::new();
+            spans.push(Span::raw(indent));
+
+            if node.is_dir {
+                let marker = if node.expanded { "▾" } else { "▸" };
+                spans.push(Span::styled(
+                    format!("{} ", marker),
+                    Style::default().fg(Color::Blue),
+                ));
+                let sel = dir_selection_state(&state.tree, &state.entries, n);
+                let check = match sel {
+                    SelectionState::All => "[x]",
+                    SelectionState::Partial => "[~]",
+                    SelectionState::None => "[ ]",
+                };
+                spans.push(Span::raw(format!("{} ", check)));
+                if let Some(idx) = node.entry_idx {
+                    let e = &state.entries[idx];
+                    spans.push(Span::styled(
+                        format!("{} ", e.kind.letter()),
+                        Style::default()
+                            .fg(e.kind.color())
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!("{}/", node.name),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::raw("  "));
+                let sel_flag = node
+                    .entry_idx
+                    .map(|i| state.entries[i].selected)
+                    .unwrap_or(false);
+                let check = if sel_flag { "[x]" } else { "[ ]" };
+                spans.push(Span::raw(format!("{} ", check)));
+                if let Some(idx) = node.entry_idx {
+                    let e = &state.entries[idx];
+                    spans.push(Span::styled(
+                        format!("{} ", e.kind.letter()),
+                        Style::default()
+                            .fg(e.kind.color())
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
+                spans.push(Span::raw(node.name.clone()));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
     let selected_count = state.entries.iter().filter(|e| e.selected).count();
@@ -575,9 +883,10 @@ fn draw(f: &mut ratatui::Frame, state: &mut AppState) {
         .highlight_symbol("> ");
     f.render_stateful_widget(list, panes[0], &mut state.list_state);
 
+    let cur_node = state.visible[state.cursor.min(state.visible.len() - 1)];
     let diff = state
         .diff_cache
-        .get(&state.cursor)
+        .get(&cur_node)
         .cloned()
         .unwrap_or_else(|| "(loading)".to_string());
     let diff_lines: Vec<Line> = diff
@@ -607,7 +916,7 @@ fn draw(f: &mut ratatui::Frame, state: &mut AppState) {
     f.render_widget(diff_widget, panes[1]);
 
     let help = Paragraph::new(Line::from(vec![Span::styled(
-        " j/k: nav · space: toggle · a: all · A/Enter: apply · ^d/^u: scroll diff · q: abort",
+        " j/k nav · h/l fold · space toggle (recursive) · a all · A apply · ^d/^u diff scroll · q quit",
         Style::default().fg(Color::DarkGray),
     )]));
     f.render_widget(help, main[1]);
