@@ -478,27 +478,26 @@ fn tui_fold_and_unfold() {
     let tui = Tui::start(f, 180, 30);
     tui.wait_for("(0 selected / 5 total)");
 
-    // Step to src/ and collapse with h. The list pane renders leaves as
-    // "[ ] M b.rs" — the checkbox prefix uniquely scopes our match to
-    // the left pane (the right diff pane shows full paths without `[ ]`).
+    // Step to src/ and collapse with h. The src/ row renders with a
+    // `▾ src/` marker when expanded and `▸ src/` when collapsed. These
+    // markers are unique to the list pane.
     tui.send_key("j");
     tui.send_key("j"); // src/
     let before = tui.capture();
     assert!(
-        before.contains("[ ] M b.rs"),
-        "expected b.rs in list before fold:\n{before}"
+        before.contains("▾ src/"),
+        "expected expanded src/ before fold:\n{before}"
     );
     tui.send_key("h");
 
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let now = tui.capture();
-        if !now.contains("[ ] M b.rs") && !now.contains("[ ] M a.rs") {
-            assert!(now.contains("▸"), "expected collapsed marker:\n{now}");
+        if now.contains("▸ src/") {
             break;
         }
         if Instant::now() >= deadline {
-            panic!("fold never hid children:\n{}", now);
+            panic!("fold never collapsed src/:\n{}", now);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -507,11 +506,11 @@ fn tui_fold_and_unfold() {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let now = tui.capture();
-        if now.contains("[ ] M b.rs") || now.contains("[ ] M a.rs") {
+        if now.contains("▾ src/") {
             break;
         }
         if Instant::now() >= deadline {
-            panic!("unfold never restored children:\n{}", now);
+            panic!("unfold never restored expanded src/:\n{}", now);
         }
         std::thread::sleep(Duration::from_millis(50));
     }

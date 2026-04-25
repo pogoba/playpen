@@ -84,6 +84,21 @@ struct Tree {
     roots: Vec<usize>,
 }
 
+/// One rendered row. With path collapsing, a row can represent a chain of
+/// single-child directories (e.g. `foo/bar/baz/`); `head` is the topmost
+/// node in the chain and `tail` is the deepest. Selection acts on the
+/// whole subtree (head and tail give the same descendants by the collapse
+/// rule); expansion acts on the tail (its children appear below this row).
+struct VisibleRow {
+    head: usize,
+    tail: usize,
+    chain: Vec<usize>,
+    /// Per-ancestor "is last visible sibling" flag, root-first. Drives the
+    /// `│  ` vs `   ` segments of the tree connector.
+    ancestor_last_flags: Vec<bool>,
+    is_last: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SelectionState {
     None,
@@ -177,20 +192,82 @@ fn build_tree(entries: &[Entry]) -> Tree {
     tree
 }
 
-fn rebuild_visible(tree: &Tree, visible: &mut Vec<usize>) {
+fn rebuild_visible(tree: &Tree, visible: &mut Vec<VisibleRow>) {
     visible.clear();
-    fn walk(tree: &Tree, idx: usize, out: &mut Vec<usize>) {
-        out.push(idx);
-        let node = &tree.nodes[idx];
-        if node.is_dir && node.expanded {
-            for &c in &node.children {
-                walk(tree, c, out);
+    fn walk(
+        tree: &Tree,
+        node_idx: usize,
+        ancestor_flags: &[bool],
+        is_last: bool,
+        out: &mut Vec<VisibleRow>,
+    ) {
+        // Extend the chain through single-child implicit dirs.
+        // Stops if cur is not a dir, is collapsed, has its own entry
+        // (would lose the entry letter), or has != 1 child.
+        let mut chain = vec![node_idx];
+        let mut cur = node_idx;
+        loop {
+            let n = &tree.nodes[cur];
+            if !n.is_dir {
+                break;
+            }
+            if !n.expanded {
+                break;
+            }
+            if n.entry_idx.is_some() {
+                break;
+            }
+            if n.children.len() != 1 {
+                break;
+            }
+            let only = n.children[0];
+            chain.push(only);
+            cur = only;
+        }
+        out.push(VisibleRow {
+            head: node_idx,
+            tail: cur,
+            chain,
+            ancestor_last_flags: ancestor_flags.to_vec(),
+            is_last,
+        });
+        let tail_node = &tree.nodes[cur];
+        if tail_node.is_dir && tail_node.expanded {
+            let mut new_flags = ancestor_flags.to_vec();
+            new_flags.push(is_last);
+            let n_children = tail_node.children.len();
+            for (i, &c) in tail_node.children.iter().enumerate() {
+                walk(tree, c, &new_flags, i + 1 == n_children, out);
             }
         }
     }
-    for &root in &tree.roots {
-        walk(tree, root, visible);
+    let n_roots = tree.roots.len();
+    for (i, &r) in tree.roots.iter().enumerate() {
+        walk(tree, r, &[], i + 1 == n_roots, visible);
     }
+}
+
+fn chain_display_name(tree: &Tree, chain: &[usize]) -> String {
+    let mut s = String::new();
+    for (i, &idx) in chain.iter().enumerate() {
+        if i > 0 {
+            s.push('/');
+        }
+        s.push_str(&tree.nodes[idx].name);
+    }
+    if tree.nodes[*chain.last().unwrap()].is_dir {
+        s.push('/');
+    }
+    s
+}
+
+fn connector_string(ancestor_last_flags: &[bool], is_last: bool) -> String {
+    let mut s = String::new();
+    for &flag in ancestor_last_flags {
+        s.push_str(if flag { "   " } else { "│  " });
+    }
+    s.push_str(if is_last { "└─ " } else { "├─ " });
+    s
 }
 
 fn collect_descendant_entries(tree: &Tree, node_idx: usize, out: &mut Vec<usize>) {
@@ -611,7 +688,7 @@ fn copy_meta(src: &Path, dst: &Path) -> std::io::Result<()> {
 struct AppState {
     entries: Vec<Entry>,
     tree: Tree,
-    visible: Vec<usize>,
+    visible: Vec<VisibleRow>,
     cursor: usize,
     list_state: ListState,
     diff_offset: u16,
@@ -620,19 +697,19 @@ struct AppState {
     lower: PathBuf,
 }
 
-fn current_node(state: &AppState) -> usize {
-    state.visible[state.cursor.min(state.visible.len() - 1)]
+fn current_row(state: &AppState) -> &VisibleRow {
+    &state.visible[state.cursor.min(state.visible.len() - 1)]
 }
 
 fn refresh_visible_keep_cursor(state: &mut AppState) {
-    let prev_node = if state.visible.is_empty() {
+    let prev_tail = if state.visible.is_empty() {
         None
     } else {
-        Some(state.visible[state.cursor.min(state.visible.len() - 1)])
+        Some(state.visible[state.cursor.min(state.visible.len() - 1)].tail)
     };
     rebuild_visible(&state.tree, &mut state.visible);
-    if let Some(node) = prev_node {
-        if let Some(pos) = state.visible.iter().position(|&n| n == node) {
+    if let Some(tail) = prev_tail {
+        if let Some(pos) = state.visible.iter().position(|r| r.chain.contains(&tail)) {
             state.cursor = pos;
             return;
         }
@@ -672,10 +749,10 @@ fn tui_loop(
     let mut decision: Option<bool> = None;
 
     let loop_result: Result<(), Box<dyn Error>> = loop {
-        let node_idx = current_node(&state);
-        if !state.diff_cache.contains_key(&node_idx) {
-            let text = node_diff_text(&state, node_idx);
-            state.diff_cache.insert(node_idx, text);
+        let tail_idx = current_row(&state).tail;
+        if !state.diff_cache.contains_key(&tail_idx) {
+            let text = node_diff_text(&state, tail_idx);
+            state.diff_cache.insert(tail_idx, text);
         }
         state.list_state.select(Some(state.cursor));
         if let Err(e) = terminal.draw(|f| draw(f, &mut state)) {
@@ -712,20 +789,20 @@ fn tui_loop(
                     }
                 }
                 (KeyCode::Char(' '), _) => {
-                    let n = current_node(&state);
-                    toggle_node_selection(&state.tree, &mut state.entries, n);
+                    let head = current_row(&state).head;
+                    toggle_node_selection(&state.tree, &mut state.entries, head);
                 }
                 (KeyCode::Enter, _) | (KeyCode::Tab, _) => {
-                    let n = current_node(&state);
-                    if state.tree.nodes[n].is_dir {
-                        state.tree.nodes[n].expanded = !state.tree.nodes[n].expanded;
+                    let tail = current_row(&state).tail;
+                    if state.tree.nodes[tail].is_dir {
+                        state.tree.nodes[tail].expanded = !state.tree.nodes[tail].expanded;
                         refresh_visible_keep_cursor(&mut state);
                     }
                 }
                 (KeyCode::Right, _) | (KeyCode::Char('l'), _) => {
-                    let n = current_node(&state);
-                    if state.tree.nodes[n].is_dir && !state.tree.nodes[n].expanded {
-                        state.tree.nodes[n].expanded = true;
+                    let tail = current_row(&state).tail;
+                    if state.tree.nodes[tail].is_dir && !state.tree.nodes[tail].expanded {
+                        state.tree.nodes[tail].expanded = true;
                         refresh_visible_keep_cursor(&mut state);
                     } else if state.cursor + 1 < state.visible.len() {
                         state.cursor += 1;
@@ -733,17 +810,19 @@ fn tui_loop(
                     }
                 }
                 (KeyCode::Left, _) | (KeyCode::Char('h'), _) => {
-                    let n = current_node(&state);
-                    if state.tree.nodes[n].is_dir && state.tree.nodes[n].expanded {
-                        state.tree.nodes[n].expanded = false;
+                    let tail = current_row(&state).tail;
+                    let head = current_row(&state).head;
+                    if state.tree.nodes[tail].is_dir && state.tree.nodes[tail].expanded {
+                        state.tree.nodes[tail].expanded = false;
                         refresh_visible_keep_cursor(&mut state);
                     } else {
-                        // jump to parent dir if any
-                        let depth = state.tree.nodes[n].depth;
+                        // jump to parent dir if any (compare by head depth,
+                        // which is the row's effective indentation level)
+                        let depth = state.tree.nodes[head].depth;
                         if depth > 0 {
                             for i in (0..state.cursor).rev() {
-                                let cand = state.visible[i];
-                                if state.tree.nodes[cand].depth < depth {
+                                let cand_head = state.visible[i].head;
+                                if state.tree.nodes[cand_head].depth < depth {
                                     state.cursor = i;
                                     state.diff_offset = 0;
                                     break;
@@ -835,57 +914,72 @@ fn draw(f: &mut ratatui::Frame, state: &mut AppState) {
     let items: Vec<ListItem> = state
         .visible
         .iter()
-        .map(|&n| {
-            let node = &state.tree.nodes[n];
-            let indent = "  ".repeat(node.depth);
+        .map(|row| {
+            let tail = &state.tree.nodes[row.tail];
             let mut spans: Vec<Span> = Vec::new();
-            spans.push(Span::raw(indent));
 
-            if node.is_dir {
-                let marker = if node.expanded { "▾" } else { "▸" };
+            // Letter gutter (fixed 2 chars: letter + space, or two spaces).
+            if let Some(idx) = tail.entry_idx {
+                let e = &state.entries[idx];
                 spans.push(Span::styled(
-                    format!("{} ", marker),
-                    Style::default().fg(Color::Blue),
-                ));
-                let sel = dir_selection_state(&state.tree, &state.entries, n);
-                let check = match sel {
-                    SelectionState::All => "[x]",
-                    SelectionState::Partial => "[~]",
-                    SelectionState::None => "[ ]",
-                };
-                spans.push(Span::raw(format!("{} ", check)));
-                if let Some(idx) = node.entry_idx {
-                    let e = &state.entries[idx];
-                    spans.push(Span::styled(
-                        format!("{} ", e.kind.letter()),
-                        Style::default()
-                            .fg(e.kind.color())
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-                spans.push(Span::styled(
-                    format!("{}/", node.name),
-                    Style::default().add_modifier(Modifier::BOLD),
+                    format!("{} ", e.kind.letter()),
+                    Style::default()
+                        .fg(e.kind.color())
+                        .add_modifier(Modifier::BOLD),
                 ));
             } else {
                 spans.push(Span::raw("  "));
-                let sel_flag = node
+            }
+
+            // Tree connector based on this row's visible position. Dim
+            // colour so the connectors recede behind the names.
+            spans.push(Span::styled(
+                connector_string(&row.ancestor_last_flags, row.is_last),
+                Style::default().fg(Color::DarkGray),
+            ));
+
+            // Expansion marker for the tail dir.
+            if tail.is_dir {
+                let marker = if tail.expanded { "▾ " } else { "▸ " };
+                spans.push(Span::styled(
+                    marker.to_string(),
+                    Style::default().fg(Color::Blue),
+                ));
+            }
+
+            // Selection marker (before the name). Only rendered when
+            // selected/partial; unselected rows get no leading marker.
+            let sel = if tail.is_dir {
+                dir_selection_state(&state.tree, &state.entries, row.head)
+            } else {
+                let s = tail
                     .entry_idx
                     .map(|i| state.entries[i].selected)
                     .unwrap_or(false);
-                let check = if sel_flag { "[x]" } else { "[ ]" };
-                spans.push(Span::raw(format!("{} ", check)));
-                if let Some(idx) = node.entry_idx {
-                    let e = &state.entries[idx];
-                    spans.push(Span::styled(
-                        format!("{} ", e.kind.letter()),
-                        Style::default()
-                            .fg(e.kind.color())
-                            .add_modifier(Modifier::BOLD),
-                    ));
+                if s {
+                    SelectionState::All
+                } else {
+                    SelectionState::None
                 }
-                spans.push(Span::raw(node.name.clone()));
+            };
+            match sel {
+                SelectionState::All => spans.push(Span::raw("[x] ")),
+                SelectionState::Partial => spans.push(Span::raw("[~] ")),
+                SelectionState::None => {}
             }
+
+            // Full chain name. Trailing `/` already appended by the helper
+            // when the tail is a directory.
+            let name = chain_display_name(&state.tree, &row.chain);
+            if tail.is_dir {
+                spans.push(Span::styled(
+                    name,
+                    Style::default().add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::raw(name));
+            }
+
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -901,10 +995,10 @@ fn draw(f: &mut ratatui::Frame, state: &mut AppState) {
         .highlight_symbol("> ");
     f.render_stateful_widget(list, panes[0], &mut state.list_state);
 
-    let cur_node = state.visible[state.cursor.min(state.visible.len() - 1)];
+    let cur_tail = state.visible[state.cursor.min(state.visible.len() - 1)].tail;
     let diff = state
         .diff_cache
-        .get(&cur_node)
+        .get(&cur_tail)
         .cloned()
         .unwrap_or_else(|| "(loading)".to_string());
     let diff_lines: Vec<Line> = diff
