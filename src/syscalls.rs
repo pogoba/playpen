@@ -779,45 +779,30 @@ use std::ffi::CString;
 /// architecture-specific syscall number. Unknown names (returning -1) are
 /// silently skipped.
 pub fn resolve_syscall_map(sets: &[&SyscallFilterSet]) -> HashMap<i32, &'static str> {
-    let mut list = vec![];
+    let mut map = HashMap::new();
     for set in sets {
-        collect_into(&mut list, set);
+        collect_into(&mut map, set);
     }
-    // resolve syscall id
-    for syscall in list {
-        if let Ok(cname) = CString::new(syscall) {
-            let nr = unsafe {
-                libseccomp_sys::seccomp_syscall_resolve_name(cname.as_ptr())
-            };
-            if nr >= 0 {
-                map.insert(nr, entry);
-            }
-        }
-    }
-
     map
 }
 
-fn collect_into(list: &mut Vec<&'static str>, set: &SyscallFilterSet) {
+fn collect_into(map: &mut HashMap<i32, &'static str>, set: &SyscallFilterSet) {
     for &entry in set.syscalls {
         if let Some(group_name) = entry.strip_prefix('@') {
             // Expand @group reference
             let full_name = format!("@{}", group_name);
             if let Some(sub) = find_set(&full_name) {
-                collect_into(list, sub);
+                collect_into(map, sub);
             }
         } else {
-            list.push(entry);
+            if let Ok(cname) = CString::new(entry) {
+                let nr = unsafe {
+                    libseccomp_sys::seccomp_syscall_resolve_name(cname.as_ptr())
+                };
+                if nr >= 0 {
+                    map.insert(nr, entry);
+                }
+            }
         }
     }
-}
-
-pub fn get_syscalls_of(sets: &[&SyscallFilterSet]) -> Vec<(i32, &'static str)> {
-    let mut syscalls = vec![];
-
-    for set in sets {
-
-    }
-
-    syscalls
 }
