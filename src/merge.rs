@@ -265,13 +265,67 @@ fn diff_text(entry: &Entry, upper: &Path, lower: &Path) -> String {
                     if s.is_empty() {
                         "-- files compare equal --\n".into()
                     } else {
-                        s
+                        sanitize_for_tui(&s)
                     }
                 }
                 Err(err) => format!("(could not run diff: {})\n", err),
             }
         }
     }
+}
+
+fn sanitize_for_tui(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut col: usize = 0;
+    while let Some(c) = chars.next() {
+        match c {
+            '\n' => {
+                out.push('\n');
+                col = 0;
+            }
+            '\t' => {
+                // Expand to next multiple of 8 so columns stay aligned.
+                let pad = 8 - (col % 8);
+                for _ in 0..pad {
+                    out.push(' ');
+                }
+                col += pad;
+            }
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    while let Some(&c2) = chars.peek() {
+                        chars.next();
+                        if (0x40..=0x7e).contains(&(c2 as u32)) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => loop {
+                    match chars.next() {
+                        None | Some('\x07') => break,
+                        Some('\x1b') => {
+                            if matches!(chars.peek(), Some('\\')) {
+                                chars.next();
+                            }
+                            break;
+                        }
+                        _ => {}
+                    }
+                },
+                Some(_) | None => {}
+            },
+            c if (c as u32) < 0x20 || (c as u32) == 0x7f => {
+                out.push('·');
+                col += 1;
+            }
+            _ => {
+                out.push(c);
+                col += 1;
+            }
+        }
+    }
+    out
 }
 
 fn apply(entry: &Entry, upper: &Path, lower: &Path) -> std::io::Result<()> {
@@ -558,3 +612,4 @@ fn draw(f: &mut ratatui::Frame, state: &mut AppState) {
     )]));
     f.render_widget(help, main[1]);
 }
+
