@@ -342,14 +342,7 @@ fn main() {
     }
 
     // Build syscall number → name map from syscalls.rs filter sets
-    let syscall_map = syscalls::resolve_syscall_map(&[
-        &syscalls::CHOWN,
-        &syscalls::FILE_SYSTEM,
-        &syscalls::KEYRING,
-        &syscalls::MODULE,
-        &syscalls::MOUNT,
-        &syscalls::SETUID,
-    ]);
+    let syscall_map = syscalls::resolve_syscall_map(syscalls::ALL_SETS);
 
     let portal = match FdPortal::new() {
         Ok(portal) => portal,

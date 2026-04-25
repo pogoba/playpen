@@ -1,4 +1,5 @@
 use crate::fd_portal;
+use crate::syscalls;
 use std::io::{self, IsTerminal, Write};
 use std::os::unix::io::OwnedFd;
 use std::os::fd::IntoRawFd;
@@ -64,7 +65,17 @@ pub fn enable_seccomp(sender: &fd_portal::FdPortalSender, syscall_map: &std::col
     //         openat_notif
     //     ));
 
-    for &sys in syscall_map.keys() {
+    // let syscalls = syscalls::get_syscalls_of(&[
+    let syscalls = syscalls::resolve_syscall_map(&[
+        &syscalls::CHOWN,
+        &syscalls::FILE_SYSTEM,
+        &syscalls::KEYRING,
+        &syscalls::MODULE,
+        &syscalls::MOUNT,
+        &syscalls::SETUID,
+    ]);
+
+    for &sys in syscalls.keys() {
         let ret = unsafe {
             libseccomp_sys::seccomp_rule_add(
                 ctx,
