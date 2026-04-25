@@ -1,5 +1,6 @@
 mod fd_portal;
 mod fmt_syscall;
+mod merge;
 mod syscalls;
 mod seccomp;
 
@@ -27,10 +28,25 @@ use std::ptr;
 
 #[derive(Parser)]
 #[command(name = "playpen")]
-#[command(about = "A simple command runner", long_about = None)]
-#[command(trailing_var_arg = true)]
+#[command(about = "Sandboxing and overlay tooling", long_about = None)]
 #[command(arg_required_else_help = true)]
 struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(clap::Subcommand)]
+enum Cmd {
+    /// Run a command under the seccomp sandbox.
+    Run(RunArgs),
+    /// Interactively merge an overlayfs upper layer into its lower layer.
+    Merge(merge::MergeArgs),
+}
+
+#[derive(clap::Args)]
+#[command(trailing_var_arg = true)]
+#[command(arg_required_else_help = true)]
+struct RunArgs {
     /// Skip confirmation prompt
     #[arg(long)]
     no_confirm: bool,
@@ -322,7 +338,19 @@ fn request_syscall_permission(syscall: i64, args: [u64; 6], pid: libc::pid_t, pr
 
 fn main() {
     let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Run(args) => run_cmd(args),
+        Cmd::Merge(args) => match merge::run(args) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("merge failed: {}", err);
+                std::process::exit(1);
+            }
+        },
+    }
+}
 
+fn run_cmd(cli: RunArgs) {
     if cli.args.is_empty() {
         eprintln!("No command specified");
         std::process::exit(1);
