@@ -45,8 +45,7 @@ pub struct KillArgs {
 }
 
 fn xdg_runtime_dir() -> Result<PathBuf, Box<dyn Error>> {
-    let v = std::env::var("XDG_RUNTIME_DIR")
-        .map_err(|_| "XDG_RUNTIME_DIR is not set")?;
+    let v = std::env::var("XDG_RUNTIME_DIR").map_err(|_| "XDG_RUNTIME_DIR is not set")?;
     if v.is_empty() {
         return Err("XDG_RUNTIME_DIR is empty".into());
     }
@@ -120,11 +119,7 @@ fn ensure_mounted(name: &str) -> Result<(), Box<dyn Error>> {
         .arg(&mountpoint)
         .status()?;
     if !status.success() {
-        return Err(format!(
-            "sudo mount overlayfs at {} failed",
-            mountpoint.display()
-        )
-        .into());
+        return Err(format!("sudo mount overlayfs at {} failed", mountpoint.display()).into());
     }
     Ok(())
 }
@@ -229,15 +224,14 @@ pub fn enter(args: EnterArgs) -> Result<(), Box<dyn Error>> {
     // start command in sandbox
     let mut cmd = Command::new("sudo");
     cmd.arg("bwrap")
-        .arg("--bind")
+        .arg("--bind") // bind root
         .arg(&mountpoint)
         .arg("/")
+        // /run doesnt exist in sandbox because it is a tmpfs. Selectively restore relevant
+        // children.
         .arg("--ro-bind")
         .arg("/run/current-system")
         .arg("/run/current-system")
-        .arg("--bind")
-        .arg("/nix/var/nix/daemon-socket")
-        .arg("/nix/var/nix/daemon-socket")
         .arg("--dir")
         .arg("/run/systemd/resolve")
         .arg("--ro-bind")
@@ -246,20 +240,29 @@ pub fn enter(args: EnterArgs) -> Result<(), Box<dyn Error>> {
         .arg("--ro-bind")
         .arg("/run/nscd")
         .arg("/run/nscd")
+        // Sockets are not connected to host services unless we explicitly bind them. We do this
+        // here for services that we assume are secure.
+        .arg("--bind")
+        .arg("/nix/var/nix/daemon-socket")
+        .arg("/nix/var/nix/daemon-socket")
+        // Auxilliary filesystems
         .arg("--proc")
         .arg("/proc")
         .arg("--dev")
         .arg("/dev")
+        // Create our own XDG_RUNTIME_DIR
         .arg("--tmpfs")
         .arg(&xdg)
         .arg("--ro-bind")
         .arg(&env_file_host)
         .arg(&env_file_sandbox)
+        // Misc:
         .arg("--setenv")
         .arg("BASH_ENV")
         .arg(&env_file_sandbox)
         .arg("--die-with-parent")
         .arg("--")
+        // Drop root privileges and act like user
         .arg("setpriv")
         .arg(format!("--reuid={}", uid))
         .arg(format!("--regid={}", gid))
@@ -275,7 +278,10 @@ pub fn enter(args: EnterArgs) -> Result<(), Box<dyn Error>> {
     }
 
     let mut child = cmd.spawn().map_err(|e| {
-        format!("failed to spawn `sudo bwrap …`: {} (is bwrap installed?)", e)
+        format!(
+            "failed to spawn `sudo bwrap …`: {} (is bwrap installed?)",
+            e
+        )
     })?;
     let child_pid = child.id();
     let pidfile = dir.join("pids").join(child_pid.to_string());
@@ -352,8 +358,7 @@ pub fn kill(args: KillArgs) -> Result<(), Box<dyn Error>> {
                 break;
             }
             if Instant::now() >= deadline {
-                let stragglers: Vec<String> =
-                    remaining.iter().map(|p| p.to_string()).collect();
+                let stragglers: Vec<String> = remaining.iter().map(|p| p.to_string()).collect();
                 let _ = Command::new("sudo")
                     .arg("kill")
                     .arg("-KILL")
@@ -370,9 +375,7 @@ pub fn kill(args: KillArgs) -> Result<(), Box<dyn Error>> {
             .arg(&mountpoint)
             .status()?;
         if !st.success() {
-            return Err(
-                format!("sudo umount {} failed", mountpoint.display()).into(),
-            );
+            return Err(format!("sudo umount {} failed", mountpoint.display()).into());
         }
     }
 
@@ -413,7 +416,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let tmp = std::env::temp_dir().join(format!("playpen-test-{}-{}", std::process::id(), nanos));
+        let tmp =
+            std::env::temp_dir().join(format!("playpen-test-{}-{}", std::process::id(), nanos));
         let xdg = tmp.join("xdg");
         let pids = xdg.join(PLAYPEN_SUBDIR).join("foo").join("pids");
         fs::create_dir_all(&pids).unwrap();
