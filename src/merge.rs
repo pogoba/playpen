@@ -39,6 +39,12 @@ pub struct MergeArgs {
     /// otherwise required.
     #[arg(long)]
     pub lower: Option<PathBuf>,
+
+    /// Invert the merge direction: write the host's (lower) version of each
+    /// selected entry through the overlay mountpoint, so the live sandbox
+    /// view picks up the host content. Requires NAME.
+    #[arg(long)]
+    pub from_host: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -323,7 +329,9 @@ fn toggle_node_selection(tree: &Tree, entries: &mut [Entry], node_idx: usize) {
 }
 
 pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
-    let (upper, lower) = resolve_layers(&args)?;
+    let resolved = resolve_layers(&args)?;
+    let upper = &resolved.upper;
+    let lower = &resolved.lower;
 
     if !upper.is_dir() {
         return Err(format!("upper layer is not a directory: {}", upper.display()).into());
@@ -332,7 +340,7 @@ pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
         return Err(format!("lower layer is not a directory: {}", lower.display()).into());
     }
 
-    let mut entries = scan(&upper, &lower)?;
+    let mut entries = scan(upper, lower)?;
     if entries.is_empty() {
         println!("No changes in upper layer.");
         return Ok(());
@@ -343,7 +351,7 @@ pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
         return Err("merge requires a TTY for the interactive picker".into());
     }
 
-    let selected = match tui_loop(entries, &upper, &lower)? {
+    let selected = match tui_loop(entries, upper, lower)? {
         Some(s) => s,
         None => {
             println!("Aborted.");
@@ -356,9 +364,19 @@ pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    let dest_label = match &resolved.mount {
+        Some(m) => m.clone(),
+        None => lower.clone(),
+    };
+
     for entry in &selected {
-        apply(entry, &upper, &lower)
-            .map_err(|e| format!("apply {}: {}", entry.rel_path.display(), e))?;
+        match &resolved.mount {
+            Some(mount) => apply_from_host(entry, lower, mount).map_err(|e| {
+                format!("apply --from-host {}: {}", entry.rel_path.display(), e)
+            })?,
+            None => apply(entry, upper, lower)
+                .map_err(|e| format!("apply {}: {}", entry.rel_path.display(), e))?,
+        }
     }
 
     let n = selected.len();
@@ -366,25 +384,56 @@ pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
         "Applied {} entr{} to {}",
         n,
         if n == 1 { "y" } else { "ies" },
-        lower.display()
+        dest_label.display()
     );
     Ok(())
 }
 
-fn resolve_layers(args: &MergeArgs) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+struct ResolvedLayers {
+    upper: PathBuf,
+    lower: PathBuf,
+    /// `Some(mountpoint)` when running in `--from-host` mode; the apply
+    /// loop writes through this path instead of into `lower`.
+    mount: Option<PathBuf>,
+}
+
+fn resolve_layers(args: &MergeArgs) -> Result<ResolvedLayers, Box<dyn Error>> {
+    if args.from_host {
+        let name = args
+            .name
+            .as_deref()
+            .ok_or("--from-host requires a NAME (the named overlay to write into)")?;
+        let upper = crate::overlay::upper_path(name)?;
+        let mount = crate::overlay::mount_path(name)?;
+        let lower = args.lower.clone().unwrap_or_else(|| PathBuf::from("/"));
+        return Ok(ResolvedLayers {
+            upper,
+            lower,
+            mount: Some(mount),
+        });
+    }
     if let Some(name) = &args.name {
         let upper = crate::overlay::upper_path(name)?;
         let lower = args.lower.clone().unwrap_or_else(|| PathBuf::from("/"));
-        return Ok((upper, lower));
+        return Ok(ResolvedLayers {
+            upper,
+            lower,
+            mount: None,
+        });
     }
-    let upper = args.upper.clone().ok_or(
-        "merge needs either NAME (positional) or --upper/--lower",
-    )?;
+    let upper = args
+        .upper
+        .clone()
+        .ok_or("merge needs either NAME (positional) or --upper/--lower")?;
     let lower = args
         .lower
         .clone()
         .ok_or("merge needs --lower when --upper is given without a NAME")?;
-    Ok((upper, lower))
+    Ok(ResolvedLayers {
+        upper,
+        lower,
+        mount: None,
+    })
 }
 
 fn scan(upper: &Path, lower: &Path) -> std::io::Result<Vec<Entry>> {
@@ -674,6 +723,69 @@ fn apply(entry: &Entry, upper: &Path, lower: &Path) -> std::io::Result<()> {
                 fs::copy(&upper_path, &lower_path)?;
                 copy_meta(&upper_path, &lower_path).ok();
             }
+        }
+    }
+    Ok(())
+}
+
+/// Inverse of `apply`: write the host's view of each entry through the
+/// overlay mountpoint so the live sandbox sees host content. Goes through
+/// the overlay's normal write path, which keeps overlayfs caches coherent
+/// for any attached `enter` sessions (unlike scribbling on upperdir
+/// directly, which would be UB per the overlayfs contract).
+fn apply_from_host(entry: &Entry, lower: &Path, mount: &Path) -> std::io::Result<()> {
+    let lower_path = lower.join(&entry.rel_path);
+    let mount_dst = mount.join(&entry.rel_path);
+
+    match entry.kind {
+        ChangeKind::Added => {
+            // Upper has it, lower doesn't. Drop it from the sandbox view by
+            // removing through the overlay mount.
+            match fs::symlink_metadata(&mount_dst) {
+                Ok(meta) => {
+                    if meta.file_type().is_dir() {
+                        fs::remove_dir_all(&mount_dst)?;
+                    } else {
+                        fs::remove_file(&mount_dst)?;
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        ChangeKind::Modified | ChangeKind::Deleted => {
+            // Lower is the host-truth version; copy it through the overlay
+            // mount so the sandbox picks up host content. For Deleted the
+            // overlay currently has a whiteout — writing creates a real
+            // upper file that masks it.
+            let meta = fs::symlink_metadata(&lower_path)?;
+            let ftype = meta.file_type();
+            create_parent(&mount_dst)?;
+            if ftype.is_symlink() {
+                let target = fs::read_link(&lower_path)?;
+                if path_exists(&mount_dst) {
+                    fs::remove_file(&mount_dst)?;
+                }
+                symlink(&target, &mount_dst)?;
+            } else if ftype.is_dir() {
+                if !path_exists(&mount_dst) {
+                    fs::create_dir_all(&mount_dst)?;
+                }
+                copy_meta(&lower_path, &mount_dst).ok();
+            } else {
+                fs::copy(&lower_path, &mount_dst)?;
+                copy_meta(&lower_path, &mount_dst).ok();
+            }
+        }
+        ChangeKind::OpaqueDir => {
+            // Removing the trusted.overlay.opaque xattr requires touching
+            // upperdir behind the overlay's back; rm-then-recopy through
+            // the mount would whiteout the lower contents instead of
+            // exposing them. Bail rather than do the wrong thing silently.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "OpaqueDir entries cannot be reverted via --from-host (would whiteout host contents); revert manually",
+            ));
         }
     }
     Ok(())
