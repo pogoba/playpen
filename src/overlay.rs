@@ -129,10 +129,14 @@ fn ensure_mounted(name: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn write_env_file(path: &Path) -> Result<(), Box<dyn Error>> {
+fn write_env_file(path: &Path, overlay_name: &str) -> Result<(), Box<dyn Error>> {
     // Mirror nonowrap: capture `export -p` so the inner bash can re-source
-    // the caller's env via BASH_ENV.
-    let out = Command::new("bash").args(["-c", "export -p"]).output()?;
+    // the caller's env via BASH_ENV. Override `$name` so PS1 reflects the
+    // sandbox (most distro prompts read $name when set).
+    let out = Command::new("bash")
+        .env("name", format!("pp:{}", overlay_name))
+        .args(["-c", "export -p"])
+        .output()?;
     if !out.status.success() {
         return Err("bash -c 'export -p' failed".into());
     }
@@ -200,7 +204,7 @@ pub fn enter(args: EnterArgs) -> Result<(), Box<dyn Error>> {
     let dir = overlay_dir(&args.name)?;
     let own_pid = std::process::id();
     let env_file_host = dir.join(format!("env-{}", own_pid));
-    write_env_file(&env_file_host)?;
+    write_env_file(&env_file_host, &args.name)?;
 
     let target_cmd: Vec<String> = if args.cmd.is_empty() {
         let shell = std::env::var("SHELL")
