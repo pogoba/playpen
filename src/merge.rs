@@ -156,13 +156,14 @@ fn build_tree(entries: &[Entry]) -> Tree {
             }
 
             let name = comp.as_os_str().to_string_lossy().into_owned();
+            let hidden = name.starts_with('.');
             let node_idx = tree.nodes.len();
             tree.nodes.push(TreeNode {
                 name,
                 full_path: accum.clone(),
                 depth,
                 is_dir: want_dir,
-                expanded: true,
+                expanded: !hidden,
                 entry_idx: entry_for_node,
                 children: Vec::new(),
             });
@@ -202,6 +203,63 @@ fn build_tree(entries: &[Entry]) -> Tree {
         sort_children(&mut tree, r);
     }
     tree
+}
+
+/// Mark gitignored directories as collapsed by default. For each dir
+/// node, walk up the on-disk parent chain (rooted at `lower`) collecting
+/// `.gitignore` files and ask each whether the dir is ignored. Hidden
+/// dirs (already collapsed by `build_tree`) are skipped to avoid
+/// redundant I/O.
+fn apply_ignore_rules(tree: &mut Tree, lower: &Path) {
+    use ignore::gitignore::Gitignore;
+    use std::collections::HashMap;
+
+    let lower_canon = lower.canonicalize().unwrap_or_else(|_| lower.to_path_buf());
+    // Cache parsed `.gitignore` per containing dir; `None` = no file there.
+    let mut cache: HashMap<PathBuf, Option<Gitignore>> = HashMap::new();
+
+    fn lookup<'a>(
+        cache: &'a mut HashMap<PathBuf, Option<Gitignore>>,
+        dir: &Path,
+    ) -> Option<&'a Gitignore> {
+        if !cache.contains_key(dir) {
+            let gi_path = dir.join(".gitignore");
+            let val = if gi_path.is_file() {
+                let (gi, _err) = Gitignore::new(&gi_path);
+                Some(gi)
+            } else {
+                None
+            };
+            cache.insert(dir.to_path_buf(), val);
+        }
+        cache.get(dir).and_then(|o| o.as_ref())
+    }
+
+    let n = tree.nodes.len();
+    for i in 0..n {
+        if !tree.nodes[i].is_dir || !tree.nodes[i].expanded {
+            continue;
+        }
+        let abs = lower_canon.join(&tree.nodes[i].full_path);
+        let mut ignored = false;
+        let mut cur = abs.parent();
+        while let Some(p) = cur {
+            if let Some(gi) = lookup(&mut cache, p) {
+                let m = gi.matched_path_or_any_parents(&abs, true);
+                if m.is_ignore() {
+                    ignored = true;
+                    break;
+                }
+                if m.is_whitelist() {
+                    break;
+                }
+            }
+            cur = p.parent();
+        }
+        if ignored {
+            tree.nodes[i].expanded = false;
+        }
+    }
 }
 
 fn rebuild_visible(tree: &Tree, visible: &mut Vec<VisibleRow>) {
@@ -864,7 +922,8 @@ fn tui_loop(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let tree = build_tree(&entries);
+    let mut tree = build_tree(&entries);
+    apply_ignore_rules(&mut tree, lower);
     let mut visible = Vec::new();
     rebuild_visible(&tree, &mut visible);
 

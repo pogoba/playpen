@@ -60,6 +60,42 @@ fn overlay_dir(name: &str) -> Result<PathBuf, Box<dyn Error>> {
     Ok(overlays_root()?.join(name))
 }
 
+/// Resolve the on-disk upperdir for a named overlay. Validates the name
+/// and confirms the directory exists. Used by `playpen merge <NAME>`.
+pub fn upper_path(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    validate_name(name)?;
+    let p = overlay_dir(name)?.join("overlayfs-upper");
+    if !p.is_dir() {
+        return Err(format!(
+            "overlay {:?} has no upperdir at {} (run `playpen enter {}` first?)",
+            name,
+            p.display(),
+            name,
+        )
+        .into());
+    }
+    Ok(p)
+}
+
+/// Resolve the live overlay mountpoint for a named overlay. Verifies the
+/// path is currently an overlayfs mount — writing through it goes via the
+/// overlay's normal write path, which keeps caches coherent for any
+/// attached `enter` sessions. Used by `playpen merge --from-host`.
+pub fn mount_path(name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    validate_name(name)?;
+    let p = overlay_dir(name)?.join("overlayfs");
+    if !is_overlay_mounted(&p)? {
+        return Err(format!(
+            "overlay {:?} is not mounted at {} (run `playpen enter {}` first?)",
+            name,
+            p.display(),
+            name,
+        )
+        .into());
+    }
+    Ok(p)
+}
+
 fn validate_name(name: &str) -> Result<(), Box<dyn Error>> {
     if name.is_empty() {
         return Err("overlay name must not be empty".into());
