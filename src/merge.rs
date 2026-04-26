@@ -26,13 +26,19 @@ use std::process::Command;
 
 #[derive(Args)]
 pub struct MergeArgs {
-    /// Overlay upperdir (source of changes).
-    #[arg(long)]
-    pub upper: PathBuf,
+    /// Named overlay (resolves --upper to its upperdir; --lower defaults
+    /// to `/`). Mutually exclusive with `--upper`.
+    #[arg(conflicts_with = "upper")]
+    pub name: Option<String>,
 
-    /// Overlay lowerdir (target of merge).
+    /// Overlay upperdir (source of changes). Required when NAME is omitted.
     #[arg(long)]
-    pub lower: PathBuf,
+    pub upper: Option<PathBuf>,
+
+    /// Overlay lowerdir (target of merge). Defaults to `/` when NAME is given;
+    /// otherwise required.
+    #[arg(long)]
+    pub lower: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -317,14 +323,16 @@ fn toggle_node_selection(tree: &Tree, entries: &mut [Entry], node_idx: usize) {
 }
 
 pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
-    if !args.upper.is_dir() {
-        return Err(format!("upper layer is not a directory: {}", args.upper.display()).into());
+    let (upper, lower) = resolve_layers(&args)?;
+
+    if !upper.is_dir() {
+        return Err(format!("upper layer is not a directory: {}", upper.display()).into());
     }
-    if !args.lower.is_dir() {
-        return Err(format!("lower layer is not a directory: {}", args.lower.display()).into());
+    if !lower.is_dir() {
+        return Err(format!("lower layer is not a directory: {}", lower.display()).into());
     }
 
-    let mut entries = scan(&args.upper, &args.lower)?;
+    let mut entries = scan(&upper, &lower)?;
     if entries.is_empty() {
         println!("No changes in upper layer.");
         return Ok(());
@@ -335,7 +343,7 @@ pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
         return Err("merge requires a TTY for the interactive picker".into());
     }
 
-    let selected = match tui_loop(entries, &args.upper, &args.lower)? {
+    let selected = match tui_loop(entries, &upper, &lower)? {
         Some(s) => s,
         None => {
             println!("Aborted.");
@@ -349,7 +357,7 @@ pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
     }
 
     for entry in &selected {
-        apply(entry, &args.upper, &args.lower)
+        apply(entry, &upper, &lower)
             .map_err(|e| format!("apply {}: {}", entry.rel_path.display(), e))?;
     }
 
@@ -358,9 +366,25 @@ pub fn run(args: MergeArgs) -> Result<(), Box<dyn Error>> {
         "Applied {} entr{} to {}",
         n,
         if n == 1 { "y" } else { "ies" },
-        args.lower.display()
+        lower.display()
     );
     Ok(())
+}
+
+fn resolve_layers(args: &MergeArgs) -> Result<(PathBuf, PathBuf), Box<dyn Error>> {
+    if let Some(name) = &args.name {
+        let upper = crate::overlay::upper_path(name)?;
+        let lower = args.lower.clone().unwrap_or_else(|| PathBuf::from("/"));
+        return Ok((upper, lower));
+    }
+    let upper = args.upper.clone().ok_or(
+        "merge needs either NAME (positional) or --upper/--lower",
+    )?;
+    let lower = args
+        .lower
+        .clone()
+        .ok_or("merge needs --lower when --upper is given without a NAME")?;
+    Ok((upper, lower))
 }
 
 fn scan(upper: &Path, lower: &Path) -> std::io::Result<Vec<Entry>> {
