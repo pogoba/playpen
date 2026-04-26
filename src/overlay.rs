@@ -199,13 +199,25 @@ impl Drop for CleanupGuard {
 
 pub fn enter(args: EnterArgs) -> Result<(), Box<dyn Error>> {
     validate_name(&args.name)?;
-    ensure_mounted(&args.name)?;
 
     let dir = overlay_dir(&args.name)?;
     let own_pid = std::process::id();
+    let xdg = xdg_runtime_dir()?;
+    let uid = unsafe { libc::getuid() }.to_string();
+    let gid = unsafe { libc::getgid() }.to_string();
+    let mountpoint = dir.join("overlayfs");
+
+    // create overlayfs if needed
+    ensure_mounted(&args.name)?;
+
+    // record user environment to restore inside the sandbox
     let env_file_host = dir.join(format!("env-{}", own_pid));
     write_env_file(&env_file_host, &args.name)?;
+    // The env file lives under $XDG_RUNTIME_DIR, which is different inside the
+    // sandbox — we will bind a copy at a fixed path so BASH_ENV can find it.
+    let env_file_sandbox = format!("/tmp/playpen-env-{}", own_pid);
 
+    // determine what to run inside the sandbox
     let target_cmd: Vec<String> = if args.cmd.is_empty() {
         let shell = std::env::var("SHELL")
             .map_err(|_| "$SHELL is not set; pass a command after the overlay name")?;
@@ -214,15 +226,7 @@ pub fn enter(args: EnterArgs) -> Result<(), Box<dyn Error>> {
         args.cmd.clone()
     };
 
-    let xdg = xdg_runtime_dir()?;
-    let uid = unsafe { libc::getuid() }.to_string();
-    let gid = unsafe { libc::getgid() }.to_string();
-    let mountpoint = dir.join("overlayfs");
-
-    // The env file lives under $XDG_RUNTIME_DIR, which we tmpfs inside the
-    // sandbox — bind a copy at a fixed path so BASH_ENV can find it.
-    let env_file_sandbox = format!("/tmp/playpen-env-{}", own_pid);
-
+    // start command in sandbox
     let mut cmd = Command::new("sudo");
     cmd.arg("bwrap")
         .arg("--bind")
