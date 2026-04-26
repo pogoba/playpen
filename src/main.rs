@@ -1,6 +1,7 @@
 mod fd_portal;
 mod fmt_syscall;
 mod merge;
+mod overlay;
 mod syscalls;
 mod seccomp;
 
@@ -41,6 +42,12 @@ enum Cmd {
     Run(RunArgs),
     /// Interactively merge an overlayfs upper layer into its lower layer.
     Merge(merge::MergeArgs),
+    /// Enter (or create) a named, persistent overlayfs sandbox via bwrap.
+    Enter(overlay::EnterArgs),
+    /// List named overlays and the active session pids attached to them.
+    List,
+    /// Tear down a named overlay: SIGTERM its sessions, unmount, and remove.
+    Kill(overlay::KillArgs),
 }
 
 #[derive(clap::Args)]
@@ -344,6 +351,27 @@ fn main() {
             Ok(()) => {}
             Err(err) => {
                 eprintln!("merge failed: {}", err);
+                std::process::exit(1);
+            }
+        },
+        Cmd::Enter(args) => match overlay::enter(args) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("enter failed: {}", err);
+                std::process::exit(1);
+            }
+        },
+        Cmd::List => match overlay::list() {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("list failed: {}", err);
+                std::process::exit(1);
+            }
+        },
+        Cmd::Kill(args) => match overlay::kill(args) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!("kill failed: {}", err);
                 std::process::exit(1);
             }
         },
